@@ -4085,6 +4085,7 @@ internal static class PortraitAncientEvent
 internal static class PortraitCardPick
 {
     private const string LoopMeta = "Sts2PortraitCardPickLoop";
+    private const string SlotMeta = "Sts2PortraitCardPickSlot";
 
     internal static void EnsureLoop(Control screen)
     {
@@ -4130,12 +4131,24 @@ internal static class PortraitCardPick
         // descriptions grow with them. Holders are positioned directly and
         // center-pivot scaled; CardRow itself is a zero-sized center anchor
         // the game owns, and it stays untouched.
+        // Slots are pinned to each holder on first sight: the game moves the
+        // hovered card to the front of the child list for z-order, and a grid
+        // keyed on child order swapped the cards under the finger on the
+        // press that should have selected one.
         var holders = new System.Collections.Generic.List<Control>();
         foreach (var child in row.GetChildren())
             if (child is Control { Visible: true } holder)
                 holders.Add(holder);
         if (holders.Count == 0)
             return;
+        var nextSlot = 0;
+        foreach (var h in holders)
+            if (h.HasMeta(SlotMeta))
+                nextSlot = Math.Max(nextSlot, (int)h.GetMeta(SlotMeta) + 1);
+        foreach (var h in holders)
+            if (!h.HasMeta(SlotMeta))
+                h.SetMeta(SlotMeta, nextSlot++);
+        holders.Sort((a, b) => ((int)a.GetMeta(SlotMeta)).CompareTo((int)b.GetMeta(SlotMeta)));
         const float cardScale = 1.5f;
         const float gapX = 44f;
         const float gapY = 36f;
@@ -4177,6 +4190,36 @@ internal static class PortraitCardPick
             // drift so presses are not cancelled mid-animation.
             if ((target - ar.Position).Length() > 3f)
                 alts.GlobalPosition += target - ar.Position;
+        }
+    }
+}
+
+// The map's drag range is two landscape constants: the container's Y is
+// nudged back into [-600, 1800] every frame, and the current row parks at
+// -600 + row * distY. On a 1080-tall view that puts the bottom row near the
+// bottom edge; on a 2596-tall portrait canvas the same -600 leaves the bottom
+// 45 percent of the screen as bare parchment (the gap under the map). The
+// lower bound moves down by a portrait allowance so the bottom row sits above
+// the legend; every park below it glides there through the game's own lerp.
+[HarmonyPatch(typeof(NMapScreen), "UpdateScrollPosition")]
+internal static class MapScrollRangePatch
+{
+    internal const float PortraitAllowance = 780f;
+
+    private static IEnumerable<CodeInstruction> Transpiler(IEnumerable<CodeInstruction> instructions)
+    {
+        var portrait = OperatingSystem.IsAndroid();
+        foreach (var instruction in instructions)
+        {
+            if (portrait
+                && instruction.opcode == System.Reflection.Emit.OpCodes.Ldc_R4
+                && instruction.operand is float f
+                && Math.Abs(f + 600f) < 0.01f)
+            {
+                yield return new CodeInstruction(System.Reflection.Emit.OpCodes.Ldc_R4, -600f + PortraitAllowance);
+                continue;
+            }
+            yield return instruction;
         }
     }
 }

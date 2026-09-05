@@ -516,3 +516,34 @@ visual collisions and unplayable states are the biggest bug class.
   date line below it.
 - **Status**: verified
 - **Fixed in**: 0.4.0
+
+## BUG-045: card pick grid swapped cards under the finger
+
+- **Symptom**: tapping a card on the reward/boss card pick shuffled the three
+  cards to new positions instead of selecting one; a second tap on the moved
+  card selected it.
+- **Cause**: the game moves the hovered card holder to the front of CardRow's
+  child list for z-order. The portrait 2+1 grid assigned slots by child order
+  on every pass, so the hover that precedes a touch press re-dealt the grid
+  and the press released over a different card.
+- **Fix**: slots are pinned to each holder on first sight (meta) and the grid
+  sorts by that slot. Verified on device: one tap selects (deck 16 to 17).
+- **Status**: verified
+- **Fixed in**: 0.4.0
+
+## BUG-046: map parked with the bottom 45 percent of the screen empty
+
+- **Symptom**: on entering an act (and whenever the current row is low), the
+  map's bottom row sat mid-screen with bare parchment below it down to the
+  drawing tools; scrolling could not bring it lower.
+- **Cause**: NMapScreen nudges the container's Y back into the landscape
+  constants [-600, 1800] every frame and parks the current row at -600 +
+  row * distY. On a 1080-tall view that puts the bottom row near the bottom
+  edge; on the 2596-tall portrait canvas the same -600 leaves the band.
+- **Fix**: a transpiler on UpdateScrollPosition replaces the two -600
+  constants with -600 + 780 (portrait allowance). Parks below the new bound
+  glide there through the game's own lerp, so the act start still animates.
+  Verified on device: the bottom row sits just above the legend, rows fill
+  the screen up to the HUD.
+- **Status**: verified
+- **Fixed in**: 0.4.0

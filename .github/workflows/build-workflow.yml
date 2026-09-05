@@ -17,10 +17,20 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Install System Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3 python3-pip python3-venv zip build-essential
+
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '9.0.x'
+
+      - name: Install CSharpier Tool
+        run: |
+          dotnet tool install -g csharpier
+          echo "$HOME/.dotnet/tools" >> $GITHUB_PATH
 
       - name: Setup JDK 17
         uses: actions/setup-java@v4
@@ -44,7 +54,7 @@ jobs:
           chmod +x scripts/*.sh
           ./scripts/setup-godot-source.sh
           ./scripts/build-godot.sh
-          ./scripts/build.sh
+          ./scripts/build.sh --no-bump
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4

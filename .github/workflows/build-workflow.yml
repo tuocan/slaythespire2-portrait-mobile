@@ -55,17 +55,29 @@ jobs:
           chmod +x scripts/*.sh
           ./scripts/setup-godot-source.sh
           
-          # 1. Build the base Godot AAR template
+          # 1. Build base Godot AAR
           cd vendor/godot/platform/android/java
           ./gradlew assembleTemplateRelease
           cd "$GITHUB_WORKSPACE"
           mkdir -p android/libs/release
           find vendor/godot/platform/android/java -name "*.aar" -exec cp {} android/libs/release/godot-lib.template_release.aar \;
 
-          # 2. Compile Godot C++ .so native binaries and inject them into the AAR
+          # 2. Compile Godot C++ native .so and inject into AAR
           ./scripts/build-godot.sh
 
-          # 3. Build STS2 mobile patcher & assemble final APK
+          # 3. Generate temporary keystore so Gradle can sign the release APK
+          keytool -genkey -v -keystore "$GITHUB_WORKSPACE/android/release.keystore" \
+            -storepass android -alias androiddebugkey -keypass android \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -dname "CN=Android Debug,O=Android,C=US"
+
+          export ORG_GRADLE_PROJECT_release_keystore_file="$GITHUB_WORKSPACE/android/release.keystore"
+          export ORG_GRADLE_PROJECT_release_keystore_password="android"
+          export ORG_GRADLE_PROJECT_release_key_alias="androiddebugkey"
+          export ORG_GRADLE_PROJECT_release_key_password="android"
+          export ORG_GRADLE_PROJECT_perform_signing="true"
+
+          # 4. Build STS2 mobile patcher & assemble final APK
           ./scripts/build.sh --no-bump
 
       - name: Upload APK Artifact

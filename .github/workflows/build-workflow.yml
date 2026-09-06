@@ -59,6 +59,9 @@ jobs:
             android/libs/release
             vendor/godot/platform/android/java/lib/libs
           key: godot-cpp-v2-${{ hashFiles('scripts/build-godot.sh', 'scripts/setup-godot-source.sh', 'patches/godot/*') }}
+          restore-keys: |
+            godot-cpp-v2-
+            godot-cpp-
 
       - name: Compile Godot Engine Native Binaries
         env:
@@ -84,23 +87,34 @@ jobs:
           dotnet restore src/STS2Mobile/STS2Mobile.csproj -r android-arm64
           dotnet publish src/STS2Mobile/STS2Mobile.csproj -c Release -r android-arm64 --self-contained false || dotnet publish src/STS2Mobile/STS2Mobile.csproj -c Release
 
-      - name: Collect Native Shared Libraries (.so)
+      - name: Bundle Native Shared Libraries (.so) & Complete BCL (.dll)
         run: |
           export ANDROID_NDK_ROOT="$ANDROID_SDK_ROOT/ndk/28.1.13356709"
           
           mkdir -p android/libs/release/arm64-v8a
           mkdir -p android/src/main/jniLibs/arm64-v8a
+          mkdir -p android/assets/dotnet_bcl
 
-          # 1. Copy Mono runtime .so files (libmonosgen-2.0.so, etc.) from nuget packages
+          # 1. Copy ALL Mono runtime .so files
           find ~/.nuget/packages -name "*.so" -path "*/android-arm64/*" -exec cp -v {} android/libs/release/arm64-v8a/ \; 2>/dev/null || true
+          find ~/.dotnet -name "*.so" -path "*/android-arm64/*" -exec cp -v {} android/libs/release/arm64-v8a/ \; 2>/dev/null || true
 
           # 2. Copy NDK libc++_shared.so
           find "$ANDROID_NDK_ROOT" -name "libc++_shared.so" -path "*aarch64*" -exec cp -v {} android/libs/release/arm64-v8a/ \; 2>/dev/null || true
 
-          # 3. Copy any native .so files compiled in native/ or vendor dirs (libsts2.so)
+          # 3. Copy any native .so files compiled in native/ or vendor dirs
           find . -name "*.so" -not -path "./android/build/*" -not -path "./.git/*" -exec cp -v {} android/libs/release/arm64-v8a/ \; 2>/dev/null || true
 
-          # Mirror libs to AGP jniLibs and update base template AAR
+          # 4. Copy ALL Mono Android BCL assemblies (System.Private.CoreLib.dll, System.Runtime.dll, etc.)
+          find ~/.nuget/packages -name "*.dll" -path "*/android-arm64/*" -exec cp -v {} android/assets/dotnet_bcl/ \; 2>/dev/null || true
+          find ~/.nuget/packages -name "System.Private.CoreLib.dll" -exec cp -v {} android/assets/dotnet_bcl/ \; 2>/dev/null || true
+          find ~/.dotnet -name "*.dll" -path "*/android-arm64/*" -exec cp -v {} android/assets/dotnet_bcl/ \; 2>/dev/null || true
+          find ~/.dotnet -name "System.Private.CoreLib.dll" -exec cp -v {} android/assets/dotnet_bcl/ \; 2>/dev/null || true
+
+          # 5. Copy upstream godot export assemblies
+          cp -v upstream/godot-export/.godot/mono/publish/arm64/*.dll android/assets/dotnet_bcl/ 2>/dev/null || true
+
+          # 6. Mirror libs to AGP jniLibs and inject into base template AAR
           cp -v android/libs/release/arm64-v8a/*.so android/src/main/jniLibs/arm64-v8a/ 2>/dev/null || true
 
           TMPAAR=$(mktemp -d)
@@ -109,8 +123,10 @@ jobs:
           (cd "$TMPAAR" && zip -u "$GITHUB_WORKSPACE/android/libs/release/godot-lib.template_release.aar" jni/arm64-v8a/*.so)
           rm -rf "$TMPAAR"
 
-          echo "packaged libs:"
+          echo "--- PACKAGED SO LIBRARIES ---"
           ls -la android/libs/release/arm64-v8a/
+          echo "--- PACKAGED BCL ASSEMBLIES ---"
+          ls -la android/assets/dotnet_bcl/
 
       - name: Generate Bootstrap PCK
         run: |
@@ -122,6 +138,9 @@ jobs:
         run: |
           sed -i 's/signingConfig signingConfigs.release/signingConfig signingConfigs.debug/g' android/build.gradle
           ./scripts/build.sh --no-bump
+
+          # Final verification safety pass: re-copy BCL into assets in case build.sh modified assets dir
+          find ~/.nuget/packages -name "System.Private.CoreLib.dll" -exec cp -v {} android/assets/dotnet_bcl/ \; 2>/dev/null || true
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4

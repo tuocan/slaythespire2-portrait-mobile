@@ -55,7 +55,7 @@ jobs:
           chmod +x scripts/*.sh
           ./scripts/setup-godot-source.sh
           
-          # 1. Build base Godot AAR template
+          # 1. Build base Godot AAR
           cd vendor/godot/platform/android/java
           ./gradlew assembleTemplateRelease
           cd "$GITHUB_WORKSPACE"
@@ -65,14 +65,14 @@ jobs:
           # 2. Compile Godot C++ native .so and inject into AAR
           ./scripts/build-godot.sh
 
-          # 3. Generate keystore and configure gradle.properties
+          # 3. Generate keystore and append ABSOLUTE path to gradle.properties
           keytool -genkey -v -keystore "$GITHUB_WORKSPACE/android/release.keystore" \
             -storepass android -alias androiddebugkey -keypass android \
             -keyalg RSA -keysize 2048 -validity 10000 \
             -dname "CN=Android Debug,O=Android,C=US"
 
-          cat << 'EOF' >> android/gradle.properties
-          release_keystore_file=release.keystore
+          cat << EOF >> android/gradle.properties
+          release_keystore_file=$GITHUB_WORKSPACE/android/release.keystore
           release_keystore_password=android
           release_key_alias=androiddebugkey
           release_key_password=android

@@ -59,28 +59,36 @@ jobs:
           cd vendor/godot/platform/android/java
           ./gradlew assembleTemplateRelease
           cd "$GITHUB_WORKSPACE"
-          mkdir -p android/libs/release
+          mkdir -p android/libs/release/arm64-v8a
           find vendor/godot/platform/android/java -name "*.aar" -exec cp {} android/libs/release/godot-lib.template_release.aar \;
 
-          # 2. Compile Godot C++ native .so and inject into AAR
+          # 2. Compile Godot C++ native .so
           ./scripts/build-godot.sh
 
           # 3. Patch android/build.gradle to sign release build using debug key
           sed -i 's/signingConfig signingConfigs.release/signingConfig signingConfigs.debug/g' android/build.gradle
 
-          # 4. Generate the bootstrap PCK (contains res://project.binary, res://project.godot, res://bootstrap.tscn)
+          # 4. Generate the bootstrap PCK
           python3 scripts/make-bootstrap-pck.py
 
-          # 5. Populate android/assets/dotnet_bcl with all Mono BCL + upstream + published assemblies
+          # 5. Populate android/assets/dotnet_bcl with ALL assemblies (.NET 9 BCL + upstream + published)
           mkdir -p android/assets/dotnet_bcl
           cp -a upstream/godot-export/.godot/mono/publish/arm64/*.dll android/assets/dotnet_bcl/ 2>/dev/null || true
-          find ~/.nuget/packages ~/.dotnet /usr/share/dotnet -path "*/runtimes/android-arm64/*" -name "*.dll" -exec cp {} android/assets/dotnet_bcl/ \; 2>/dev/null || true
+          cp -a src/STS2Mobile/bin/Release/net9.0/publish/*.dll android/assets/dotnet_bcl/ 2>/dev/null || true
+          find ~/.nuget/packages ~/.dotnet /usr/share/dotnet -name "*.dll" -path "*/runtimes/android-arm64/*" -exec cp {} android/assets/dotnet_bcl/ \; 2>/dev/null || true
           find ~/.nuget/packages ~/.dotnet /usr/share/dotnet -name "System.Private.CoreLib.dll" -exec cp {} android/assets/dotnet_bcl/ \; 2>/dev/null || true
 
-          # 6. Copy ALL native C++ / Mono runtime .so dependencies
-          mkdir -p android/libs/release/arm64-v8a
+          # 6. Copy ALL native C++ .so libraries (NDK STL, Mono runtime libmonosgen-2.0.so, Godot C++)
           find "$ANDROID_NDK_ROOT" -name "libc++_shared.so" -path "*aarch64*" -exec cp {} android/libs/release/arm64-v8a/ \; 2>/dev/null || true
           find ~/.nuget/packages -path "*/runtimes/android-arm64/native/*.so" -exec cp {} android/libs/release/arm64-v8a/ \; 2>/dev/null || true
+          find vendor/godot -name "*.so" -exec cp {} android/libs/release/arm64-v8a/ \; 2>/dev/null || true
+
+          # Inject all native .so libraries directly into the AAR as well
+          TMPAAR=$(mktemp -d)
+          mkdir -p "$TMPAAR/jni/arm64-v8a"
+          cp android/libs/release/arm64-v8a/*.so "$TMPAAR/jni/arm64-v8a/"
+          (cd "$TMPAAR" && zip -u "$GITHUB_WORKSPACE/android/libs/release/godot-lib.template_release.aar" jni/arm64-v8a/*.so)
+          rm -rf "$TMPAAR"
 
           # 7. Build STS2 mobile patcher & assemble final APK
           ./scripts/build.sh --no-bump

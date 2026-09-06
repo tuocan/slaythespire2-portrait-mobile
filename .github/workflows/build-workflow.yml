@@ -20,15 +20,7 @@ jobs:
       - name: Install System Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y python3 python3-pip python3-venv zip build-essential ccache
-
-      - name: Cache Godot Build Artifacts
-        uses: actions/cache@v4
-        with:
-          path: |
-            vendor/godot
-            android/libs/release
-          key: godot-arm64-${{ hashFiles('scripts/setup-godot-source.sh', 'scripts/build-godot.sh') }}
+          sudo apt-get install -y python3 python3-pip python3-venv zip build-essential scons
 
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
@@ -61,12 +53,19 @@ jobs:
           ARCHES: "arm64"
         run: |
           chmod +x scripts/*.sh
-          if [ ! -f "android/libs/release/arm64-v8a/libgodot_android.so" ]; then
-            ./scripts/setup-godot-source.sh
-            ./scripts/build-godot.sh
-          else
-            echo "Using cached Godot build, skipping C++ compilation!"
-          fi
+          ./scripts/setup-godot-source.sh
+          
+          # 1. Build the base Godot AAR containing AndroidManifest.xml and Java templates
+          cd vendor/godot/platform/android/java
+          ./gradlew :godot-lib:assembleTemplateRelease
+          cd "$GITHUB_WORKSPACE"
+          mkdir -p android/libs/release
+          cp vendor/godot/platform/android/java/lib/build/outputs/aar/godot-lib.template_release.aar android/libs/release/
+
+          # 2. Compile Godot C++ .so native binaries and inject them into the AAR
+          ./scripts/build-godot.sh
+
+          # 3. Build STS2 mobile patcher & assemble final APK
           ./scripts/build.sh --no-bump
 
       - name: Upload APK Artifact

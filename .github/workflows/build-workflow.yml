@@ -48,19 +48,19 @@ jobs:
 
       - name: Build Managed Project and Android APK
         env:
-          ANDROID_HOME: ${{ env.ANDROID_SDK_ROOT }}
-          ANDROID_NDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}/ndk/25.2.9519653
           ARCHES: "arm64"
         run: |
+          export ANDROID_HOME="$ANDROID_SDK_ROOT"
+          export ANDROID_NDK_ROOT="$ANDROID_SDK_ROOT/ndk/25.2.9519653"
           chmod +x scripts/*.sh
           ./scripts/setup-godot-source.sh
           
-          # 1. Build the base Godot AAR containing AndroidManifest.xml and Java templates
+          # 1. Build the base Godot AAR template
           cd vendor/godot/platform/android/java
-          ./gradlew :godot-lib:assembleTemplateRelease
+          ./gradlew assembleTemplateRelease
           cd "$GITHUB_WORKSPACE"
           mkdir -p android/libs/release
-          cp vendor/godot/platform/android/java/lib/build/outputs/aar/godot-lib.template_release.aar android/libs/release/
+          find vendor/godot/platform/android/java -name "*.aar" -exec cp {} android/libs/release/godot-lib.template_release.aar \;
 
           # 2. Compile Godot C++ .so native binaries and inject them into the AAR
           ./scripts/build-godot.sh

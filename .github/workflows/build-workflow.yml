@@ -65,17 +65,10 @@ jobs:
           # 2. Compile Godot C++ native .so and inject into AAR
           ./scripts/build-godot.sh
 
-          # 3. Generate a debug keystore at the expected debug keystore location
-          mkdir -p "$HOME/.android"
-          keytool -genkey -v -keystore "$HOME/.android/debug.keystore" \
-            -storepass android -alias androiddebugkey -keypass android \
-            -keyalg RSA -keysize 2048 -validity 10000 \
-            -dname "CN=Android Debug,O=Android,C=US"
+          # 3. Patch android/build.gradle to sign release build using standard debug key
+          sed -i 's/signingConfig signingConfigs.release/signingConfig signingConfigs.debug/g' android/build.gradle
 
-          # 4. Force Gradle to run a debug/unsigned build instead of release packaging
-          sed -i 's/export_build_type=release/export_build_type=debug/g' android/gradle.properties || true
-
-          # 5. Build STS2 mobile patcher & assemble final APK
+          # 4. Build STS2 mobile patcher & assemble final APK
           ./scripts/build.sh --no-bump
 
       - name: Upload APK Artifact

@@ -437,7 +437,20 @@ visual collisions and unplayable states are the biggest bug class.
   node was fine and a child (icon) was hidden or off-slot, most likely
   the game's OnScreenClosed -> AnimUnhover path on a touch device that
   never delivers a hover to undo it.
-- **Status**: open, not reproduced yet; watch after grid overlays close.
+- **Root cause (2026-09-06, reproduced on the act 2 map after a fight)**:
+  the tree probe showed the Deck button back inside its DeckContainer
+  margin slot but with the combat-branch transform still on it (local
+  position 574,167, scale 1.5), so it drew far off the bar. Combat places
+  the button directly; the compact branch handed only the room icon back
+  to its slot, and a MarginContainer does not re-sort on the way back
+  (same trap as BUG-014). Not a hover path after all.
+- **Fix**: the compact branch hands every directly placed child back to
+  its slot (deck, map, pause, hp, gold) and queues a sort on both rows;
+  restoring the deck alone left the scroll and the gear at their combat
+  coordinates on the next loot. Verified on device: all three right icons
+  on the loot and on the map after Skip.
+- **Status**: verified
+- **Fixed in**: 0.4.0
 
 ## BUG-040: Map legend and drawing tools drew over settings and pause
 
@@ -547,3 +560,92 @@ visual collisions and unplayable states are the biggest bug class.
   the screen up to the HUD.
 - **Status**: verified
 - **Fixed in**: 0.4.0
+
+## BUG-047: ancient event option text cut mid-sentence
+
+- **Symptom**: on act ancients (Tezcatara etc.) each relic option showed one
+  description line cut at the plate's right edge ("Exhaust the top", "Every
+  3 combats, your").
+- **Cause**: the option's Text is a fixed 830x74 rich label with wrapping
+  off, authored for a wide landscape row; the 1000-wide portrait row has no
+  room for the sentence on one line.
+- **Fix**: word wrap on, label 150 tall, option plate min height 180 (width
+  kept), block bottom margin 40, only for rows that carry a description: a
+  title-only row ("Proceed") wrapped into the tall rect came out at half
+  size from the label's own fitter, so it keeps its authored layout.
+  Verified on device: three full sentences, no plate overlap, rows above
+  the safe bottom, Proceed at full size.
+- **Status**: verified
+- **Fixed in**: 0.4.0
+
+## BUG-048: ancient events rendered at 60 percent brightness
+
+- **Symptom**: every act ancient (Neow, Tezcatara) showed a dark scene with
+  grey dialogue and dim option text; the speaker art was barely visible.
+- **Cause**: the top-bar backdrop's event branch measures the event prose
+  block by finding a "Title" node in the event room. Ancient rooms are
+  event rooms too but have no prose block; the "Title" found there sat in
+  the whole layout, so the measured depth covered the full screen (2656)
+  and the scrim dimmed everything under the bar.
+- **Fix**: the prose branch skips rooms with a visible NAncientEventLayout;
+  they keep the bar-band depth. Verified on device: white text (255,246,226)
+  on both the bubble and the options, the scene art lit.
+- **Status**: verified
+- **Fixed in**: 0.4.0
+
+## BUG-049: ancient event scene filled the top third, black below
+
+- **Symptom**: on act ancients the painted scene (a landscape Spine
+  composition drawn at 1.12 in a full-rect container) covered only the top
+  third of the phone; the middle of the screen down to the options was black
+  and the speaker's face sat under the top bar.
+- **Fix**: the portrait pass scales AncientBgContainer 2.2x about a
+  top-center anchor (590,120) and slides it 280 left, remembering the
+  authored transform in meta so repeat passes do not compound; the dialogue
+  block hangs 430 under the bar so the face shows between the bar and the
+  bubble. Verified on device with Tezcatara (act 2): face centered above the
+  bubble, scene to the options, text white. Open item: check Neow (act 1)
+  and the act 3 ancient with the same anchor; the shift may need a per
+  ancient value.
+- **Status**: verified (Tezcatara)
+- **Fixed in**: 0.4.0
+
+## BUG-050: combat top bar stayed expanded on the loot screen
+
+- **Symptom**: right after a fight the Loot overlay showed the expanded
+  combat bar (HP and gold stacked, potions in the combat station, relic
+  rows) instead of the compact bar with the potion capsule at its station.
+- **Cause**: the bar's combat branch only yielded to capstone screens; the
+  finished combat scene stays alive under the loot overlay, so
+  CombatHudActive alone still said combat.
+- **Fix**: the bar also yields to the shared eclipse rule (rewards overlay,
+  map over a finished fight). Verified on device on the loot after the act
+  2 elite: compact bar, capsule at the bar.
+- **Status**: verified
+- **Fixed in**: 0.4.0
+
+## BUG-051: loot and card pick sat 100 units lower after a fight than after a resume
+
+- **Symptom**: the Loot panel and the card pick grid hung from the expanded
+  combat bar's bottom when the fight scene was still alive underneath,
+  and from the compact bar otherwise; the same screens landed at two
+  heights depending on how they were reached.
+- **Fix**: both overlays always start from the compact content top, since
+  the bar is compact under them (BUG-050). Verified on device: loot after
+  the fight at the resume position.
+- **Status**: verified
+- **Fixed in**: 0.4.0
+
+## BUG-052: Crystal Sphere divination overlay laid out for landscape
+
+- **Where**: the "Crystal Sphere" event's Uncover Future / Payment Plan
+  options open NCrystalSphereScreen (an overlay with a sphere of tiles,
+  Big/Small Divination buttons, instructions, a divinations-left line and
+  Proceed).
+- **Symptom**: sphere on the left, the button column and instructions cut
+  at the right edge, "divinations remain" cut at the bottom-left.
+- **Plan**: portrait composition with the sphere centered in the upper
+  band, the two buttons in a row under it, instructions under those and
+  Proceed at the bottom; geometry to be measured from the tree dump the
+  open hook logs.
+- **Status**: open

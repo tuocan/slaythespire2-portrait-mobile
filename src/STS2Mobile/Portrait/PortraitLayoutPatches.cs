@@ -291,6 +291,11 @@ internal static class PortraitNodes
                     text = text[..40];
                 PatchHelper.Log($"[Portrait] {tag} {new string(' ', depth * 2)}{c.Name}:{c.GetType().Name} pos={c.Position} size={c.Size} scale={c.Scale} vis={c.Visible} clip={c.ClipContents} text={text.Replace('\n', '|')}");
             }
+            else if (node is Node2D n2)
+            {
+                var tex = node is Sprite2D sp && sp.Texture is not null ? $" tex={sp.Texture.GetWidth()}x{sp.Texture.GetHeight()} centered={sp.Centered} offset={sp.Offset}" : "";
+                PatchHelper.Log($"[Portrait] {tag} {new string(' ', depth * 2)}{n2.Name}:{n2.GetType().Name} 2D pos={n2.Position} scale={n2.Scale} vis={n2.Visible}{tex}");
+            }
             foreach (var child in node.GetChildren())
                 Walk(child, depth + 1);
         }
@@ -549,7 +554,7 @@ internal static class PortraitMainMenu
     // reads as a gap under the logo and a gap over the skyline at once.
     // Raised from 0.36 when the multiplayer row left the menu: four rows at
     // the old bias floated high and left a dead band above the bottom edge.
-    private const float MenuBlockBandBias = 0.62f;
+    private const float MenuBlockBandBias = 0.88f;
     private const float LogoTopRatio = 0.18f;
     private const float LogoScale = 0.42f;
     private const float LogoCenterOffset = 460f;
@@ -709,9 +714,10 @@ internal static class PortraitMainMenu
     // The measurement uses the remembered authored height: reading the live
     // size would shrink the scale to 1 on the second pass, because the row has
     // already been grown by the first.
-    private static float MenuScale(Control buttons)
+    private static float MenuScale(Control buttons, Vector2 canvas)
     {
         var row = MenuRowFallback;
+        var rows = 0;
         foreach (var child in buttons.GetChildren())
         {
             if (child is not Control { Visible: true } control)
@@ -721,11 +727,19 @@ internal static class PortraitMainMenu
             if (authored.Y <= 1f)
                 continue;
 
-            row = authored.Y;
-            break;
+            if (rows == 0)
+                row = authored.Y;
+            rows++;
         }
 
-        return Mathf.Clamp(MenuRowTarget / row, MenuScaleMin, MenuScaleMax);
+        // The thumb target says 168 per row; the band under the logo says how
+        // many of those fit. On a 16:9 phone the fixed scale ran the last row
+        // off the bottom edge, so the band wins when it is the tighter one.
+        var bandTop = canvas.Y * LogoBandBottomRatio;
+        var bandBottom = PortraitHudMetrics.ContentBottom(canvas.Y, PortraitDisplay.SafeBottom());
+        var need = Math.Max(rows, 1) * row + Math.Max(rows - 1, 0) * MenuRowSeparation;
+        var fit = need > 0f ? (bandBottom - bandTop) / need : MenuScaleMax;
+        return Mathf.Clamp(Math.Min(MenuRowTarget / row, fit), MenuScaleMin, MenuScaleMax);
     }
 
     private static void ApplyButtons(NMainMenu menu, Vector2 canvas, Vector2 center)
@@ -740,7 +754,7 @@ internal static class PortraitMainMenu
         // visibly breathes as the two passes alternate.
         PortraitTouchPass.MarkManaged(buttons);
 
-        var scale = MenuScale(buttons);
+        var scale = MenuScale(buttons, canvas);
         LastMenuScale = scale;
 
         if (buttons is BoxContainer box)
@@ -783,6 +797,14 @@ internal static class PortraitMainMenu
         PortraitNodes.ClearAnchors(buttons);
         buttons.PivotOffset = Vector2.Zero;
         buttons.Scale = Vector2.One;
+        // The VBox carries an authored minimum height (1306 on the 16:9
+        // check) and centers its rows inside it, so the block hung 285 lower
+        // than the placement below assumed and the last row left the screen
+        // on shorter phones. The block is exactly its rows.
+        if (buttons.CustomMinimumSize != Vector2.Zero)
+            buttons.CustomMinimumSize = Vector2.Zero;
+        if (buttons is BoxContainer menuBox && menuBox.Alignment != BoxContainer.AlignmentMode.Begin)
+            menuBox.Alignment = BoxContainer.AlignmentMode.Begin;
         var blockHeight = rows > 0
             ? rowTotal + MenuRowSeparation * scale * (rows - 1)
             : buttons.Size.Y;
@@ -1144,10 +1166,15 @@ internal static class MainMenuReticlePatch
 // variants show at once; singleplayer keeps Save and Quit.
 internal static class PortraitPauseMenu
 {
-    private const float ButtonWidth = 720f;
-    private const float ButtonHeight = 168f;
-    private const float RowSeparation = 26f;
-    private const float TitleGap = 56f;
+    // Rows take a share of the canvas width rather than a fixed 720, so a
+    // narrower or wider phone gets the same proportions; at 1180 wide this
+    // is 968. Heights and the font ceiling grew with the user's read that
+    // the earlier plates were still small for a thumb.
+    private const float ButtonWidthShare = 0.82f;
+    private const float ButtonHeight = 200f;
+    private const float RowSeparation = 30f;
+    private const float TitleGap = 64f;
+    private const float TitleScale = 1.5f;
 
     internal static void Apply(Control menu)
     {
@@ -1170,13 +1197,14 @@ internal static class PortraitPauseMenu
         if (container is BoxContainer box)
             box.AddThemeConstantOverride("separation", (int)RowSeparation);
 
+        var buttonWidth = canvas.X * ButtonWidthShare;
         var rows = 0;
         foreach (var child in container.GetChildren())
         {
             if (child is not Control { Visible: true } row)
                 continue;
 
-            row.CustomMinimumSize = new Vector2(ButtonWidth, ButtonHeight);
+            row.CustomMinimumSize = new Vector2(buttonWidth, ButtonHeight);
             // The rows came out narrower than the container and the VBox
             // left-aligned them, so the whole stack sat left of the title;
             // center each row inside the container instead.
@@ -1200,7 +1228,7 @@ internal static class PortraitPauseMenu
                 // Fitted to the grown plate the autosizer still stops at the
                 // authored ceiling, leaving small text on a big button; lift
                 // the ceiling once and let RefreshLabels re-fit below it.
-                RaiseFontCeiling(label, 1.4f);
+                RaiseFontCeiling(label, 1.8f);
             }
             rows++;
         }
@@ -1210,7 +1238,7 @@ internal static class PortraitPauseMenu
 
         var height = rows * ButtonHeight + (rows - 1) * RowSeparation;
         PortraitNodes.ClearAnchors(container);
-        container.Size = new Vector2(ButtonWidth, height);
+        container.Size = new Vector2(buttonWidth, height);
         // Centering on the canvas left the lower 40% dead under four rows;
         // the block sits in the content band at the same lower bias the
         // main menu uses, so the thumb reaches it and the hole closes.
@@ -1218,15 +1246,17 @@ internal static class PortraitPauseMenu
         var bandBottom = PortraitHudMetrics.ContentBottom(canvas.Y, PortraitDisplay.SafeBottom()) - 140f;
         var free = Mathf.Max(0f, bandBottom - bandTop - height);
         var top = bandTop + free * 0.62f;
-        container.Position += new Vector2((canvas.X - ButtonWidth) * 0.5f, top)
+        container.Position += new Vector2((canvas.X - buttonWidth) * 0.5f, top)
             - container.GlobalPosition;
 
         var title = PortraitNodes.FindControl(menu, "PausedText");
         if (title is not null)
         {
             PortraitNodes.ClearAnchors(title);
-            var titleWidth = title.Size.X > 1f ? title.Size.X : 440f;
-            var titleHeight = title.Size.Y > 1f ? title.Size.Y : 64f;
+            var titleWidth = (title.Size.X > 1f ? title.Size.X : 440f) * TitleScale;
+            var titleHeight = (title.Size.Y > 1f ? title.Size.Y : 64f) * TitleScale;
+            title.PivotOffset = Vector2.Zero;
+            title.Scale = Vector2.One * TitleScale;
             title.Position += new Vector2(
                 canvas.X * 0.5f - titleWidth * 0.5f,
                 top - TitleGap - titleHeight
@@ -1308,6 +1338,18 @@ internal static class PortraitPauseMenu
 // menu comes up, and its body touches nothing a patched copy cannot reach.
 [HarmonyPatch(typeof(MegaCrit.Sts2.Core.Nodes.Screens.PauseMenu.NPauseMenu), "Initialize")]
 internal static class PauseMenuPatch
+{
+    private static void Postfix(Control __instance)
+        => PortraitNodes.AssertLoop(__instance, () => PortraitPauseMenu.Apply(__instance));
+}
+
+// Initialize runs once per run (NGlobalUi.Initialize); the pause menu is a
+// capstone submenu shown and hidden many times after that, and on a pause
+// opened mid-combat the rows came up at their authored 372x80 with the tab
+// bottom-left: the loop from Initialize was gone. OnSubmenuOpened runs on
+// every open; its body is a public base call plus a public singleton call.
+[HarmonyPatch(typeof(MegaCrit.Sts2.Core.Nodes.Screens.PauseMenu.NPauseMenu), "OnSubmenuOpened")]
+internal static class PauseMenuOpenedPatch
 {
     private static void Postfix(Control __instance)
         => PortraitNodes.AssertLoop(__instance, () => PortraitPauseMenu.Apply(__instance));
@@ -2241,8 +2283,13 @@ internal static class PortraitTopBar
         var safeTop = PortraitDisplay.SafeTop();
         // Fullscreen capstone screens (deck view, in-run settings) open over
         // combat too; the expanded stack would poke into their content, so
-        // they always get the slim bar.
-        var combat = PortraitCombat.CombatHudActive && !IsCapstoneScreenOpen(bar);
+        // they always get the slim bar. The loot overlay and the map after a
+        // fight count the same way: the fight is over, the potions go back to
+        // their bar station (the combat scene stays alive underneath, so
+        // CombatHudActive alone still says combat).
+        var combat = PortraitCombat.CombatHudActive
+            && !IsCapstoneScreenOpen(bar)
+            && !PortraitCapstone.EclipsesCombatHud(bar);
         var left = bar.GetNodeOrNull<Control>("LeftAlignedStuff");
         var right = bar.GetNodeOrNull<Control>("RightAlignedStuff");
 
@@ -2346,6 +2393,23 @@ internal static class PortraitTopBar
             // re-sort it on the way back to the slim bar, so hand it back
             // explicitly or it lingers at the combat coordinates (BUG-014).
             RestoreIntoSlot(room);
+            // Same story for the deck button: combat places it directly at
+            // 1.5x, and its DeckContainer margin slot does not re-sort on the
+            // way back, so it kept a stale local position far off the bar and
+            // the icon "vanished" after fights (BUG-039).
+            RestoreIntoSlot(deck);
+            // The map and pause buttons are direct children of the right
+            // row; combat placed them directly as well, and an HBox only
+            // re-lays its children on a dirty event. Hand them back and ask
+            // both rows for a sort, or they stay at the combat coordinates
+            // (the scroll and the gear vanished on the loot once the deck
+            // alone was restored).
+            RestoreIntoSlot(map);
+            RestoreIntoSlot(pause);
+            RestoreIntoSlot(hp);
+            RestoreIntoSlot(gold);
+            (right as Container)?.QueueSort();
+            (left as Container)?.QueueSort();
             // Outside combat the capsule keeps its vanilla station in row 1
             // next to the gold counter, but grown into the empty stretch
             // between gold and the right icon cluster: the native slot size
@@ -2562,9 +2626,18 @@ internal static class PortraitTopBar
         // The map draws OVER the event room without hiding it, and the deep
         // event scrim hung over the map's top third; event depth only applies
         // while the event is actually the screen being read.
+        // Ancient rooms are event rooms too, but their layout has no prose
+        // block; the "Title" found there belonged to the whole layout and
+        // the measured depth covered the screen (every ancient read at 60
+        // percent brightness). They keep the default depth.
         if (PortraitSceneCache.FindByType(bar.GetTree().Root, "NEventRoom") is { Visible: true } eventRoom
             && PortraitSceneCache.FindByType(bar.GetTree().Root, "NMapScreen")
                 is not Control { Visible: true }
+            && PortraitSceneCache.FindByType(bar.GetTree().Root, "NAncientEventLayout")
+                is not Control { Visible: true }
+            // An overlay over the event (card removal grid, rewards) is the
+            // screen being read; the deep plate dimmed its top rows.
+            && PortraitSceneCache.TopOverlay() is null
             && PortraitNodes.FindControl(eventRoom, "Title")?.GetParent() is Control prose
             && prose.IsVisibleInTree())
         {
@@ -3514,10 +3587,29 @@ internal static class EventRoomPatch
                 // and the rows drew on top of each other; open the list up.
                 if (options is BoxContainer { Vertical: true } optionList)
                     optionList.AddThemeConstantOverride("separation", 30);
+                // Regular event options carry the same 830x74 unwrapped
+                // Text label as the ancients' (BUG-047): "Remove 2 cards
+                // from your" was cut at the plate's edge.
+                PortraitAncientEvent.FitOptionText(options);
                 options.PivotOffset = Vector2.Zero;
                 options.Scale = Vector2.One * optionsScale;
                 var optionsWidth = (options.Size.X > 1f ? options.Size.X : 800f) * optionsScale;
-                var optionsHeight = (options.Size.Y > 1f ? options.Size.Y : 220f) * optionsScale;
+                // The VBox keeps its old Size for a frame or more after rows
+                // leave (three plates became one "Proceed"), so the block
+                // was hung as if three rows were still there and the lone
+                // plate floated mid-screen. Measure the visible rows.
+                var visibleRows = 0;
+                var rowsHeight = 0f;
+                foreach (var child in options.GetChildren())
+                {
+                    if (child is not Control { Visible: true } row)
+                        continue;
+                    rowsHeight += Math.Max(row.Size.Y, row.CustomMinimumSize.Y);
+                    visibleRows++;
+                }
+                if (visibleRows > 1)
+                    rowsHeight += 30f * (visibleRows - 1);
+                var optionsHeight = (rowsHeight > 1f ? rowsHeight : (options.Size.Y > 1f ? options.Size.Y : 220f)) * optionsScale;
                 optionsTop = canvas.Y - PortraitDisplay.SafeBottom() - optionsHeight - 90f;
                 options.GlobalPosition = new Vector2((canvas.X - optionsWidth) * 0.5f, optionsTop);
             }
@@ -3986,6 +4078,68 @@ internal static class PortraitAncientEvent
 {
     private const string SpacerName = "Sts2PortraitAncientSpacer";
     private const string LoopMeta = "Sts2PortraitAncientLoop";
+    private const string OptionFitMeta = "Sts2PortraitAncientOptionFit";
+    private const string BgAuthoredMeta = "Sts2PortraitAncientBgAuthored";
+    private const float BgScale = 2.2f;
+    private const float BubbleTopGap = 430f;
+    private static readonly Vector2 BgAnchor = new(590f, 120f);
+    private static readonly Vector2 BgShift = new(-280f, 0f);
+
+    // The ancient's scene is a landscape Spine composition drawn at 1.12 in
+    // a full-rect container: on the phone it filled the top third and left
+    // the middle of the screen black down to the options. Scale it about a
+    // top-center anchor so the speaker keeps its place and the scene grows
+    // down to the options; the sides crop, which the wide painting affords.
+    private static void FillBackground(Control layout, Vector2 canvas)
+    {
+        if (PortraitNodes.FindControl(layout, "AncientBgContainer") is not { } bg)
+            return;
+        if (!bg.HasMeta(BgAuthoredMeta))
+            bg.SetMeta(BgAuthoredMeta, new Vector3(bg.Position.X, bg.Position.Y, bg.Scale.X));
+        var authored = bg.GetMeta(BgAuthoredMeta).AsVector3();
+        var authoredScale = Math.Max(authored.Z, 0.01f);
+        var local = (BgAnchor - new Vector2(authored.X, authored.Y)) / authoredScale;
+        // The speaker stands right of center in the wide painting; after the
+        // zoom its face hung on the right edge, so the scene slides left.
+        var target = BgAnchor - local * BgScale + BgShift;
+        bg.PivotOffset = Vector2.Zero;
+        if (Math.Abs(bg.Scale.X - BgScale) > 0.01f)
+            bg.Scale = Vector2.One * BgScale;
+        if (bg.Position.DistanceTo(target) > 1.5f)
+            bg.Position = target;
+    }
+    private const float OptionTextHeight = 150f;
+    private const float OptionRowHeight = 180f;
+
+    // Each option's Text is a fixed 830x74 rich label (title line plus one
+    // description line) with no wrapping, authored for a wide landscape row;
+    // on the 1000-wide portrait row the description ran off the right edge
+    // and was cut mid-sentence. Wrap it and give it a third line; the
+    // 160-tall plate already has the room.
+    internal static void FitOptionText(Control options)
+    {
+        foreach (var child in options.GetChildren())
+        {
+            if (child is not Control option || option.HasMeta(OptionFitMeta))
+                continue;
+            if (option.FindChild("Text", recursive: true, owned: false) is not RichTextLabel text)
+                continue;
+            // Only rows with a description need the room; a title-only row
+            // ("Proceed") wrapped into a 150-tall rect came out at half size
+            // from the label's own fitter, so it keeps its authored layout.
+            var lines = text.Text.Split('\n');
+            var hasDescription = lines.Length > 1 && lines[1].Trim().Length > 0;
+            option.SetMeta(OptionFitMeta, true);
+            if (!hasDescription)
+                continue;
+            text.AutowrapMode = TextServer.AutowrapMode.WordSmart;
+            text.CustomMinimumSize = new Vector2(text.Size.X, OptionTextHeight);
+            text.Size = new Vector2(text.Size.X, OptionTextHeight);
+            // Three text lines run 141 tall; the authored 160 plate put the
+            // next row's title on the last line. The plate grows with them.
+            option.CustomMinimumSize = new Vector2(option.CustomMinimumSize.X, OptionRowHeight);
+        }
+    }
 
     // The layout's own intro tween keeps writing the authored (bottom
     // anchored) content position for a while after _Ready, so a one-shot
@@ -4025,8 +4179,14 @@ internal static class PortraitAncientEvent
             return;
 
         var safeTop = PortraitDisplay.SafeTop();
-        var top = PortraitHudMetrics.ContentTop(safeTop) + 26f;
-        var bottom = canvas.Y - PortraitDisplay.SafeBottom() - 24f;
+        // The scene is zoomed 2.2x about a top anchor (FillBackground), which
+        // puts the speaker's face in the band right under the bar; the bubble
+        // hangs below that band so the face stays in view above the words.
+        var top = Math.Max(
+            PortraitHudMetrics.ContentTop(safeTop) + 26f,
+            PortraitHudMetrics.HudBottom(safeTop) + BubbleTopGap
+        );
+        var bottom = canvas.Y - PortraitDisplay.SafeBottom() - 40f;
 
         PortraitNodes.ClearAnchors(container);
         container.Position = new Vector2(10f, top);
@@ -4065,6 +4225,9 @@ internal static class PortraitAncientEvent
             content.MoveChild(spacer, optionsIndex);
         else if (spacer.GetIndex() < optionsIndex - 1)
             content.MoveChild(spacer, optionsIndex - 1);
+
+        FitOptionText(options);
+        FillBackground(layout, canvas);
 
         // The "next" hint follows the bubble instead of floating at the
         // bottom edge of the screen.
@@ -4111,9 +4274,10 @@ internal static class PortraitCardPick
         // reflects the live transform, so scaling converges and placement is
         // origin-agnostic.
         var safeTop = PortraitDisplay.SafeTop();
-        var y = (PortraitCombat.CombatHudActive
-            ? PortraitHudMetrics.CombatHudBottom(safeTop) + PortraitHudMetrics.ContentMargin
-            : PortraitHudMetrics.ContentTop(safeTop)) + 16f;
+        // The pick opens over the rewards overlay, where the bar is compact
+        // (BUG-050): the grid hangs from the compact content top in every
+        // case, so it does not drop 100 units after a fight.
+        var y = PortraitHudMetrics.ContentTop(safeTop) + 16f;
 
         if (PortraitNodes.FindControl(screen, "Banner") is { Visible: true } banner)
         {
@@ -4149,13 +4313,24 @@ internal static class PortraitCardPick
             if (!h.HasMeta(SlotMeta))
                 h.SetMeta(SlotMeta, nextSlot++);
         holders.Sort((a, b) => ((int)a.GetMeta(SlotMeta)).CompareTo((int)b.GetMeta(SlotMeta)));
-        const float cardScale = 1.5f;
+        const float maxCardScale = 1.5f;
         const float gapX = 44f;
         const float gapY = 36f;
-        var cardW = (holders[0].Size.X > 1f ? holders[0].Size.X : 350f) * cardScale;
-        var cardH = (holders[0].Size.Y > 1f ? holders[0].Size.Y : 520f) * cardScale;
         const int perRow = 2;
+        // The Skip plate and its gaps live under the grid; on a 16:9 canvas
+        // the fixed 1.5x grid pushed it off the screen, so the scale is the
+        // largest that keeps grid plus plate inside the content band.
+        const float skipReserve = 200f;
         var rowCount = (holders.Count + perRow - 1) / perRow;
+        var authoredW = holders[0].Size.X > 1f ? holders[0].Size.X : 350f;
+        var authoredH = holders[0].Size.Y > 1f ? holders[0].Size.Y : 520f;
+        var bandBottom = PortraitHudMetrics.ContentBottom(canvas.Y, PortraitDisplay.SafeBottom());
+        var gridRoom = bandBottom - skipReserve - y - gapY * (rowCount - 1);
+        var fitScale = gridRoom / (rowCount * authoredH);
+        var widthFit = (canvas.X - 2f * PortraitHudMetrics.EdgeMargin - gapX) / (perRow * authoredW);
+        var cardScale = Mathf.Clamp(Math.Min(Math.Min(maxCardScale, fitScale), widthFit), 0.8f, maxCardScale);
+        var cardW = authoredW * cardScale;
+        var cardH = authoredH * cardScale;
         for (var i = 0; i < holders.Count; i++)
         {
             var r = i / perRow;
@@ -4185,7 +4360,8 @@ internal static class PortraitCardPick
             alts.PivotOffset = Vector2.Zero;
             alts.Scale = Vector2.One * 1.6f;
             var ar = alts.GetGlobalRect();
-            var target = new Vector2(PortraitHudMetrics.CenterX(canvas.X, ar.Size.X), y);
+            var floorY = bandBottom - ar.Size.Y - 8f;
+            var target = new Vector2(PortraitHudMetrics.CenterX(canvas.X, ar.Size.X), Math.Min(y, floorY));
             // The open tween animates this container in; only correct real
             // drift so presses are not cancelled mid-animation.
             if ((target - ar.Position).Length() > 3f)
@@ -4204,11 +4380,23 @@ internal static class PortraitCardPick
 [HarmonyPatch(typeof(NMapScreen), "UpdateScrollPosition")]
 internal static class MapScrollRangePatch
 {
-    internal const float PortraitAllowance = 780f;
+    // 780 was measured on the 2596-tall canvas (bottom row just above the
+    // legend); the allowance is the height beyond a 1816-tall canvas so a
+    // 16:9 phone (2098) gets 282 and the row still lands on screen.
+    private const float ReferenceHeight = 1816f;
+
+    internal static float LowerBound()
+    {
+        var canvas = PortraitDisplay.CanvasSize;
+        if (!PortraitDisplay.IsPortrait(canvas))
+            return -600f;
+        return -600f + Math.Max(0f, canvas.Y - ReferenceHeight);
+    }
 
     private static IEnumerable<CodeInstruction> Transpiler(IEnumerable<CodeInstruction> instructions)
     {
         var portrait = OperatingSystem.IsAndroid();
+        var lowerBound = AccessTools.Method(typeof(MapScrollRangePatch), nameof(LowerBound));
         foreach (var instruction in instructions)
         {
             if (portrait
@@ -4216,11 +4404,56 @@ internal static class MapScrollRangePatch
                 && instruction.operand is float f
                 && Math.Abs(f + 600f) < 0.01f)
             {
-                yield return new CodeInstruction(System.Reflection.Emit.OpCodes.Ldc_R4, -600f + PortraitAllowance);
+                yield return new CodeInstruction(System.Reflection.Emit.OpCodes.Call, lowerBound);
                 continue;
             }
             yield return instruction;
         }
+    }
+}
+
+// Crystal Sphere (the divination mini-game some events open) is an overlay
+// authored for landscape: sphere left, buttons and instructions right, the
+// "divinations remain" line bottom-left. On the phone the right column and
+// the footer left the screen. First pass: dump the tree once per open so the
+// portrait composition can be measured, then place (see PortraitCrystalSphere).
+[HarmonyPatch(
+    typeof(MegaCrit.Sts2.Core.Nodes.Events.Custom.CrystalSphere.NCrystalSphereScreen),
+    "AfterOverlayOpened"
+)]
+internal static class CrystalSphereScreenPatch
+{
+    private static void Postfix(object __instance)
+    {
+        if (__instance is not Control screen)
+            return;
+        if (!screen.HasMeta("Sts2PortraitSphereDumped"))
+        {
+            screen.SetMeta("Sts2PortraitSphereDumped", true);
+            PortraitNodes.DumpSubtree(screen, "sphere", 4);
+        }
+        PortraitCrystalSphere.EnsureLoop(screen);
+    }
+}
+
+internal static class PortraitCrystalSphere
+{
+    private const string LoopMeta = "Sts2PortraitSphereLoop";
+
+    internal static void EnsureLoop(Control screen)
+    {
+        if (screen is null || !GodotObject.IsInstanceValid(screen) || screen.HasMeta(LoopMeta))
+            return;
+        screen.SetMeta(LoopMeta, true);
+        PortraitNodes.AssertLoop(screen, () => Apply(screen));
+    }
+
+    private static void Apply(Control screen)
+    {
+        var canvas = PortraitDisplay.CanvasSize;
+        if (!PortraitDisplay.IsPortrait(canvas))
+            return;
+        // Placement lands once the geometry dump has been read.
     }
 }
 
@@ -4283,7 +4516,22 @@ internal static class GridSelectTickboxPatch
 internal static class CardRewardScreenPatch
 {
     private static void Postfix(object __instance)
-        => PortraitCardPick.EnsureLoop((Control)__instance);
+    {
+        // AfterOverlayOpened tweens the Skip plate's position for 0.5 s with
+        // a Back ease toward its authored spot; the portrait loop re-places
+        // it every frame, and the two writers made the plate bounce up and
+        // down until the tween ended. Drop the tween; the loop places it.
+        try
+        {
+            if (Traverse.Create(__instance).Field("_buttonTween").GetValue() is Tween tween && tween.IsValid())
+                tween.Kill();
+        }
+        catch
+        {
+            // Field gone after a game update: the bounce returns, nothing breaks.
+        }
+        PortraitCardPick.EnsureLoop((Control)__instance);
+    }
 }
 
 [HarmonyPatch(
@@ -4358,11 +4606,11 @@ internal static class PortraitRewards
         }
         var safeTop = PortraitDisplay.SafeTop();
         var safeBottom = PortraitDisplay.SafeBottom();
-        // Rewards show over the combat room, where the HUD is still the
-        // expanded stack; the band starts below whichever bar is active.
-        var bandTop = PortraitCombat.CombatHudActive
-            ? PortraitHudMetrics.CombatHudBottom(safeTop) + PortraitHudMetrics.ContentMargin
-            : PortraitHudMetrics.ContentTop(safeTop);
+        // Rewards show over the finished combat room, and the bar goes
+        // compact for them (BUG-050); the band starts below the compact bar
+        // whether the room underneath is combat or not, so the loot after a
+        // fight sits where the loot after a resume does.
+        var bandTop = PortraitHudMetrics.ContentTop(safeTop);
         var bandBottom = PortraitHudMetrics.ContentBottom(canvas.Y, safeBottom);
         var panelBottom = bandBottom;
 

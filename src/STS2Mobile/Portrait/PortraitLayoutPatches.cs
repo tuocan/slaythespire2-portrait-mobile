@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Reflection;
 using Godot;
 using HarmonyLib;
@@ -289,7 +290,8 @@ internal static class PortraitNodes
                 };
                 if (text.Length > 40)
                     text = text[..40];
-                PatchHelper.Log($"[Portrait] {tag} {new string(' ', depth * 2)}{c.Name}:{c.GetType().Name} pos={c.Position} size={c.Size} scale={c.Scale} vis={c.Visible} clip={c.ClipContents} text={text.Replace('\n', '|')}");
+                var gr = c.GetGlobalRect();
+                PatchHelper.Log($"[Portrait] {tag} {new string(' ', depth * 2)}{c.Name}:{c.GetType().Name} pos={c.Position} size={c.Size} scale={c.Scale} global={gr.Position.X:F0},{gr.Position.Y:F0} {gr.Size.X:F0}x{gr.Size.Y:F0} a={c.Modulate.A:F2}/{c.SelfModulate.A:F2} vis={c.Visible} clip={c.ClipContents} text={text.Replace('\n', '|')}");
             }
             else if (node is Node2D n2)
             {
@@ -314,7 +316,21 @@ internal static class PortraitNodes
         {
             // Not an NBackButton; fall through to the plain write.
         }
-        if (back.Visible && back.GlobalPosition.DistanceTo(globalTarget) > 3f)
+        // A "hidden" tab is parked off-screen, not invisible (NBackButton
+        // tweens to _hidePos on Disable); driving its position while disabled
+        // dragged it on screen during the timeline tutorial. Only an enabled
+        // tab is held at the target.
+        var enabled = true;
+        try
+        {
+            if (Traverse.Create(back).Field("_isEnabled").GetValue() is bool flag)
+                enabled = flag;
+        }
+        catch
+        {
+            // Not an NClickableControl; treat as enabled.
+        }
+        if (enabled && back.Visible && back.GlobalPosition.DistanceTo(globalTarget) > 3f)
             back.GlobalPosition = globalTarget;
     }
 
@@ -903,7 +919,7 @@ internal static class PortraitCharacterSelect
     private const float InfoPanelBottomGap = 48f;
     private const float ArtToRowGap = 70f;
     private const float RowToNavGap = 44f;
-    private const float CharacterRowScale = 1.3f;
+    private const float CharacterRowScale = 1.8f;
     private const float NavButtonWidth = 200f;
     private const float NavButtonHeight = 110f;
 
@@ -1127,6 +1143,16 @@ internal static class MainMenuReticlePatch
             var right = AccessTools.Field(typeof(NMainMenu), "_buttonReticleRight")?.GetValue(__instance) as Control;
             if (label is null || left is null || right is null)
                 return;
+
+            // Touch has no hover; the wings marked whichever row the game
+            // last focused (after Save and Quit that was "Abandon Run") and
+            // read as a stale cursor. They stay off on the phone (BUG-061).
+            if (OperatingSystem.IsAndroid())
+            {
+                left.Visible = false;
+                right.Visible = false;
+                return;
+            }
 
             // The label is grown through its font size now, so its own rect is
             // already the visible one; only the reticle art still needs scaling.
@@ -1389,6 +1415,11 @@ internal static class PortraitCapstone
             return false;
 
         if (PortraitNodes.FindByType(anchor.GetTree().Root, "NRewardsScreen") is { Visible: true })
+            return true;
+
+        // The run is over: the bar goes compact and the hand/End Turn hide
+        // (the End Turn plate sat half on the game over summary).
+        if (PortraitNodes.FindByType(anchor.GetTree().Root, "NGameOverScreen") is { Visible: true })
             return true;
 
         // Skipping the loot opens the map while the finished combat scene is
@@ -3228,6 +3259,7 @@ internal static class TopBarPotionPatch
 internal static class PortraitMap
 {
     private static readonly string[] Sections = { "MapTop", "MapMid", "MapBot" };
+    private const float TopExtension = 600f;
 
     internal static void Cover(NMapBg background)
     {
@@ -3243,17 +3275,22 @@ internal static class PortraitMap
             texture.ExpandMode = TextureRect.ExpandModeEnum.IgnoreSize;
         }
 
+        // The tall portrait view shows far more above the boss than the
+        // landscape view ever did, and the parchment's torn top edge sat 550
+        // above the boss with bare screen above it (the "dark band" over the
+        // map). The middle sheet grows by 600 and the whole background moves
+        // up by that much, so the parchment runs past the top of the view.
         var middle = background.GetNodeOrNull<TextureRect>("MapMid");
         if (middle is not null)
         {
-            middle.CustomMinimumSize = new Vector2(0f, 3600f);
+            middle.CustomMinimumSize = new Vector2(0f, 3600f + TopExtension);
             middle.SizeFlagsVertical = Control.SizeFlags.ExpandFill;
         }
 
         if (!background.HasMeta("sts2_portrait_overscan"))
         {
             background.SetMeta("sts2_portrait_overscan", true);
-            background.Position -= new Vector2(0f, 120f);
+            background.Position -= new Vector2(0f, 120f + TopExtension);
         }
     }
 
@@ -3435,8 +3472,10 @@ internal static class MapScreenReadyPatch
             // furniture: the legend and the drawing-tools plate stayed bright
             // over the settings rows. Hide both while a capstone is open and
             // hand them back on close (meta marks what this pass hid).
+            // The map's own back tab (bottom-left) showed through the pause
+            // menu the same way; it is furniture here too.
             var capstoneUp = PortraitCapstone.IsOpen(__instance);
-            foreach (var name in new[] { "MapLegend", "DrawingTools" })
+            foreach (var name in new[] { "MapLegend", "DrawingTools", "Back" })
             {
                 if (PortraitNodes.FindControl(__instance, name) is not { } furniture)
                     continue;
@@ -3656,8 +3695,10 @@ internal static class PortraitShop
             return;
 
         const float margin = 24f;
-        var top = Math.Max(210f, PortraitDisplay.SafeTop() + 180f);
-        var bottom = 170f + PortraitDisplay.SafeBottom();
+        // The panel hangs from the compact bar's content top and ends above
+        // the footer strip baseline, whatever the phone's height.
+        var top = Math.Max(210f, PortraitHudMetrics.ContentTop(PortraitDisplay.SafeTop()) + 16f);
+        var bottom = canvas.Y - (PortraitHudMetrics.ContentBottom(canvas.Y, PortraitDisplay.SafeBottom()) - 60f);
         var panelWidth = canvas.X - margin * 2f;
         var panelHeight = canvas.Y - top - bottom;
 
@@ -3683,10 +3724,16 @@ internal static class PortraitShop
         // The relic and potion shelves need thumb-sized icons (they were
         // ~15dp at 0.8x in a 190-unit band); the band grows and the cards
         // above give up a little height through the cell clamp.
-        const float utilityBand = 520f;
+        // The shelf band (relics row, potions row) and the card cells share
+        // the panel; on a 16:9 canvas the fixed 520 band and the 0.72 floor
+        // stacked the card rows into each other. Both shrink with the panel
+        // (measured against the 20:9 panel height) and the cards may go to
+        // half size before anything overlaps.
+        var shelfFactor = Mathf.Clamp(panelHeight / 1900f, 0.7f, 1f);
+        var utilityBand = 520f * shelfFactor;
         var cellWidth = panelWidth / columns;
         var cellHeight = (panelHeight - utilityBand) / rows;
-        var scale = Mathf.Clamp(cellHeight / 500f, 0.72f, 1.05f);
+        var scale = Mathf.Clamp(cellHeight / 500f, 0.5f, 1.05f);
         var origin = slots.GlobalPosition;
 
         for (var i = 0; i < cards.Count; i++)
@@ -3703,9 +3750,9 @@ internal static class PortraitShop
         // (they collided and the last potion fell off the rug), so they
         // stack: relics above, potions below, both centered and clear of
         // the back tab and of the last card row's price tags.
-        const float shelfScale = 1.4f;
-        const float shelfPitch = 175f;
-        var bandY = panelHeight - utilityBand + 110f;
+        var shelfScale = 1.4f * shelfFactor;
+        var shelfPitch = 175f * shelfFactor;
+        var bandY = panelHeight - utilityBand + 110f * shelfFactor;
         // The shelf containers report less width than their three slots
         // draw (measured ~370 units at 1x), so the rendered width centers.
         var relicsWidth = Math.Max(relics?.Size.X ?? 0f, 370f) * shelfScale;
@@ -3764,6 +3811,34 @@ internal static class MerchantClosePatch
 {
     private static void Prefix(object __instance)
         => ((Node)__instance).SetMeta("sts2_portrait_shop_closed", true);
+
+    // Close slides the slots to y -1000, the authored panel height; the
+    // portrait panel is about twice that, so its lower half stayed on the
+    // room. Swap the game's tween for one that clears the whole panel.
+    private static void Postfix(object __instance)
+    {
+        if (__instance is not Node inventory || !PortraitDisplay.IsPortrait(PortraitDisplay.CanvasSize))
+            return;
+        try
+        {
+            var t = Traverse.Create(inventory);
+            if (t.Field("_inventoryTween").GetValue() is Tween old && old.IsValid())
+                old.Kill();
+            var slots = t.Field("_slotsContainer").GetValue<Control>();
+            var backstop = t.Field("_backstop").GetValue<Control>();
+            if (slots is null)
+                return;
+            var tween = inventory.GetTree().CreateTween().SetParallel();
+            if (backstop is not null)
+                tween.TweenProperty(backstop, "modulate:a", 0f, 0.8).SetEase(Tween.EaseType.InOut).SetTrans(Tween.TransitionType.Sine);
+            tween.TweenProperty(slots, "position:y", -(slots.Size.Y + 120f), 0.5).SetEase(Tween.EaseType.Out).SetTrans(Tween.TransitionType.Cubic);
+            t.Field("_inventoryTween").SetValue(tween);
+        }
+        catch (Exception e)
+        {
+            PatchHelper.Log($"[Portrait] shop close slide failed: {e.Message}");
+        }
+    }
 }
 
 [HarmonyPatch(typeof(MegaCrit.Sts2.Core.Nodes.Rooms.NMerchantRoom), "_Ready")]
@@ -3779,6 +3854,19 @@ internal static class MerchantRoomPatch
                 return;
             background.PivotOffset = background.Size * 0.5f;
             background.Scale = Vector2.One * 1.75f;
+            // The inventory parks its slots at y -1000 (its authored height)
+            // whenever it is closed, in _Ready and at the end of Close; the
+            // portrait panel is about 2100 tall, so its lower half hung over
+            // the room. A closed inventory keeps its panel fully above the
+            // screen; the open animation starts from there just the same.
+            if (PortraitNodes.FindByType(room, "NMerchantInventory") is Node inventory
+                && PortraitNodes.FindControl(inventory, "SlotsContainer") is { } slots)
+            {
+                var open = Traverse.Create(inventory).Property("IsOpen").GetValue() is true;
+                var parkY = -(slots.Size.Y + 120f);
+                if (!open && slots.Position.Y > parkY + 0.5f && !inventory.HasMeta("sts2_portrait_shop_loop"))
+                    slots.Position = new Vector2(slots.Position.X, parkY);
+            }
         });
     }
 }
@@ -3841,7 +3929,9 @@ internal static class PortraitRestSite
             1.4f
         );
         var rowHeight = baseH * scale;
-        var rowY = PortraitHudMetrics.BottomAnchoredY(canvas.Y, safeBottom, rowHeight) - 40f;
+        // Same baseline as the grid footer strip (60 above the content
+        // bottom): the plates used to hug the gesture edge.
+        var rowY = PortraitHudMetrics.ContentBottom(canvas.Y, safeBottom) - 60f - rowHeight;
         PortraitNodes.ClearAnchors(choices);
         choices.PivotOffset = Vector2.Zero;
         choices.Scale = Vector2.One * scale;
@@ -3881,6 +3971,133 @@ internal static class PortraitRestSite
 // not overridden by the deck screen, body touches only its own private field,
 // and the capstone container calls it right after the screen opens. Bonus:
 // every NCardsViewScreen subclass with a sort row gets the same fit.
+// The grid screens (deck view, smith/remove/transform picks) park their
+// footer at the canvas edge: back tab, the View Upgrades box and the one-line
+// caption hugged the gesture strip while the confirm tick sat higher up. The
+// footer is one strip 60 above the content bottom: back tab left, the tickbox
+// beside it at the same center line, the caption centered above them at
+// 1.5x, the confirm tick right on the same baseline. Everything derives from
+// the content bottom, so shorter phones keep the same strip.
+internal static class PortraitGridStrip
+{
+    private const float StripInset = 60f;
+    private const float TabHeight = 110f;
+    private const float TickboxScale = 2.2f;
+    private const float CaptionScale = 1.5f;
+    private const float CaptionReserve = 44f;
+    private const string PlateName = "Sts2PortraitGridStripPlate";
+
+    private static List<Control> FindAll(Node root, params string[] names)
+    {
+        var found = new List<Control>();
+        void Walk(Node node, int depth)
+        {
+            if (depth > 8)
+                return;
+            if (node is Control c && Array.IndexOf(names, node.Name.ToString()) >= 0)
+                found.Add(c);
+            foreach (var child in node.GetChildren())
+                Walk(child, depth + 1);
+        }
+        Walk(root, 0);
+        return found;
+    }
+
+    internal static void Place(Control screen)
+    {
+        var canvas = PortraitDisplay.CanvasSize;
+        if (!PortraitDisplay.IsPortrait(canvas))
+            return;
+        var baseline = PortraitHudMetrics.ContentBottom(canvas.Y, PortraitDisplay.SafeBottom()) - StripInset;
+        var tabTop = baseline - TabHeight;
+
+        // The preview (a card selected, the confirm tick armed) swaps in its
+        // own cancel tab and confirm; they take the same spots so the strip
+        // does not grow a second tab above the first.
+        // Every tab and tick on the screen, the preview container's own
+        // "Cancel"/"Confirm" pair included (a single-name lookup found the
+        // screen's main Confirm first and left the preview's at the edge).
+        foreach (var back in FindAll(screen, "Close", "BackButton", "Cancel", "PreviewCancel"))
+            PortraitNodes.PlaceBackTab(back, new Vector2(PortraitHudMetrics.EdgeMargin, tabTop));
+
+        var nextX = PortraitHudMetrics.EdgeMargin + 250f;
+        if (PortraitNodes.FindControl(screen, "Upgrades") is { Visible: true } box && box.Size.X > 1f)
+        {
+            box.PivotOffset = Vector2.Zero;
+            if (Math.Abs(box.Scale.X - TickboxScale) > 0.01f)
+                box.Scale = Vector2.One * TickboxScale;
+            var h = box.Size.Y * TickboxScale;
+            var target = new Vector2(nextX, tabTop + (TabHeight - h) * 0.5f);
+            if (box.GlobalPosition.DistanceTo(target) > 1.5f)
+                box.GlobalPosition = target;
+        }
+
+        if (PortraitNodes.FindControl(screen, "BottomLabel") is { } label && label.Size.X > 1f)
+        {
+            // The label sits in a container that re-lays it on every sort,
+            // so the container is what moves (BUG-014 rule); the label
+            // itself only when it stands alone.
+            var caption = label.GetParent() is Container parent ? parent : label;
+            PortraitNodes.ClearAnchors(caption);
+            caption.PivotOffset = Vector2.Zero;
+            if (Math.Abs(caption.Scale.X - CaptionScale) > 0.01f)
+                caption.Scale = Vector2.One * CaptionScale;
+            var w = caption.Size.X * CaptionScale;
+            var h = caption.Size.Y * CaptionScale;
+            var target = new Vector2((canvas.X - w) * 0.5f, tabTop - 36f - h);
+            if (caption.GlobalPosition.DistanceTo(target) > 1.5f)
+                caption.GlobalPosition = target;
+        }
+
+        foreach (var confirm in FindAll(screen, "Confirm", "PreviewConfirm"))
+        {
+            if (confirm.Size.X <= 1f)
+                continue;
+            var rect = confirm.GetGlobalRect();
+            var target = new Vector2(canvas.X - rect.Size.X - PortraitHudMetrics.EdgeMargin, baseline - rect.Size.Y);
+            if (rect.Position.DistanceTo(target) > 1.5f)
+                confirm.GlobalPosition += target - rect.Position;
+        }
+
+        // The strip needs its own ground: cards scrolled under it made the
+        // caption unreadable. A dark plate sits right above the grid in tree
+        // order (under the footer controls), and the grid's viewport ends at
+        // the plate so the last row can still scroll clear of it.
+        var stripTop = tabTop - 36f - CaptionReserve - 16f;
+        if (PortraitNodes.FindControl(screen, "CardGrid") is { } grid)
+        {
+            var plate = screen.GetNodeOrNull<ColorRect>(PlateName);
+            if (plate is null)
+            {
+                plate = new ColorRect
+                {
+                    Name = PlateName,
+                    Color = new Color(0.03f, 0.05f, 0.07f, 0.82f),
+                    MouseFilter = Control.MouseFilterEnum.Ignore,
+                };
+                screen.AddChild(plate);
+                if (grid.GetParent() == screen)
+                    screen.MoveChild(plate, grid.GetIndex() + 1);
+            }
+            var plateRect = new Rect2(0f, stripTop, canvas.X, canvas.Y - stripTop);
+            if (plate.GlobalPosition.DistanceTo(plateRect.Position) > 0.5f || plate.Size.DistanceTo(plateRect.Size) > 0.5f)
+            {
+                plate.GlobalPosition = plateRect.Position;
+                plate.Size = plateRect.Size;
+            }
+            var gridRect = grid.GetGlobalRect();
+            var wantBottom = stripTop - 8f;
+            if (Math.Abs(gridRect.End.Y - wantBottom) > 1f)
+            {
+                if (grid.AnchorBottom > 0.5f)
+                    grid.OffsetBottom += wantBottom - gridRect.End.Y;
+                else
+                    grid.Size = new Vector2(grid.Size.X, Math.Max(200f, wantBottom - gridRect.Position.Y));
+            }
+        }
+    }
+}
+
 [HarmonyPatch(
     typeof(MegaCrit.Sts2.Core.Nodes.Screens.NCardsViewScreen),
     "AfterCapstoneOpened"
@@ -3898,6 +4115,7 @@ internal static class DeckViewSortRowPatch
             var canvas = PortraitDisplay.CanvasSize;
             if (!PortraitDisplay.IsPortrait(canvas))
                 return;
+            PortraitGridStrip.Place(screen);
             if (PortraitNodes.FindControl(screen, "SortingOptions") is not { } holder)
                 return;
             if (holder.GetNodeOrNull<Control>("HBoxContainer") is not { } row)
@@ -3906,18 +4124,35 @@ internal static class DeckViewSortRowPatch
             var fit = Math.Min(1f, (canvas.X - 2f * PortraitHudMetrics.EdgeMargin) / rowWidth);
             row.PivotOffset = Vector2.Zero;
             row.Scale = Vector2.One * fit;
+            // The bar is hidden under this capstone, so the row takes the
+            // top band from the safe inset (it sat inside the cutout band),
+            // and the grid's first row starts under it.
+            var rowTop = PortraitDisplay.SafeTop() + 16f;
             row.GlobalPosition = new Vector2(
                 PortraitHudMetrics.CenterX(canvas.X, rowWidth * fit),
-                row.GlobalPosition.Y
+                rowTop
             );
-            // The View Upgrades tickbox is ~12dp tall as authored and the
-            // touch sweep skips it (not a full-width row). Grow it from its
-            // bottom-left corner into the empty band it sits in.
-            if (PortraitNodes.FindControl(screen, "Upgrades") is { Visible: true } upgrades)
+            if (!screen.HasMeta("Sts2PortraitDeckGridOffset")
+                && PortraitNodes.FindControl(screen, "CardGrid") is { } grid)
             {
-                upgrades.PivotOffset = new Vector2(0f, upgrades.Size.Y);
-                upgrades.Scale = Vector2.One * 2.2f;
+                screen.SetMeta("Sts2PortraitDeckGridOffset", true);
+                try
+                {
+                    var rowHeight = (row.Size.Y > 1f ? row.Size.Y : 60f) * fit;
+                    var contentTop = rowTop + rowHeight + 40f;
+                    var firstRowTop = grid.GlobalPosition.Y + 80f;
+                    var current = (int)(Traverse.Create(grid).Property("YOffset").GetValue() ?? 0);
+                    var shift = (int)(contentTop - firstRowTop);
+                    Traverse.Create(grid).Property("YOffset").SetValue(current + shift);
+                    AccessTools.Method(grid.GetType(), "ReflowColumns")?.Invoke(grid, null);
+                }
+                catch (Exception ex)
+                {
+                    PatchHelper.Log($"[Portrait] deck grid offset failed: {ex.GetBaseException().Message}");
+                }
             }
+            // The View Upgrades tickbox lives in the shared footer strip
+            // (PortraitGridStrip) together with the caption and the tab.
         });
     }
 }
@@ -3987,57 +4222,61 @@ internal static class PortraitCompendium
     }
 
     // The compendium's margin container keeps its landscape footprint
-    // (1920x1080 centered on the canvas), which pushes the right-aligned
-    // bottom row's visible button past the canvas edge. Sizing the margin
-    // box to the canvas pulls everything inside; the rows keep their own
-    // container arrangement.
+    // (1920x1080 centered on the canvas): a five-wide row cut at both edges.
+    // Containers reset child scale on every sort, so the shelf cards and the
+    // bottom chips move OUT to the submenu root (a plain Control) once and
+    // get laid out by hand: the four shelf cards in a 2x2 grid scaled to the
+    // canvas, the chips in a row under them. The emptied furniture hides.
+    private static readonly string[] ShelfNames =
+    {
+        "CardLibraryButton", "RelicCollectionButton", "PotionLabButton", "BestiaryButton",
+    };
+    private static readonly string[] ChipNames =
+    {
+        "LeaderboardsButton", "StatisticsButton", "RunHistoryButton",
+    };
+
     private static void Apply(Control submenu)
     {
         var canvas = PortraitDisplay.CanvasSize;
         if (!PortraitDisplay.IsPortrait(canvas))
             return;
-        var margin = PortraitNodes.FindControl(submenu, "MarginContainer");
-        var content = PortraitNodes.FindControl(submenu, "VBoxContainer");
-        if (margin is null || content is null)
+        var margin = submenu.GetNodeOrNull<Control>("MarginContainer");
+        if (margin is null)
             return;
-
         var safeTop = PortraitDisplay.SafeTop();
         var safeBottom = PortraitDisplay.SafeBottom();
         var bandTop = PortraitHudMetrics.ContentTop(safeTop);
-        var bandBottom = PortraitHudMetrics.ContentBottom(canvas.Y, safeBottom);
-
-        // Containers reset child scale on every sort, so no scale survives
-        // inside the margin/vbox chain. The shelf cards move OUT to the
-        // submenu root (a plain Control) once and get laid out by hand:
-        // three cards in a row scaled to the canvas, the stats chip
-        // centered under them. The emptied stock furniture hides.
+        var bandBottom = PortraitHudMetrics.ContentBottom(canvas.Y, safeBottom) - 60f;
         margin.Visible = false;
 
-        var shelf = new[]
-        {
-            PortraitNodes.FindControl(submenu, "CardLibraryButton"),
-            PortraitNodes.FindControl(submenu, "RelicCollectionButton"),
-            PortraitNodes.FindControl(submenu, "PotionLabButton"),
-        };
-        var stats = PortraitNodes.FindControl(submenu, "StatisticsButton");
+        var shelf = new List<Control>();
+        foreach (var name in ShelfNames)
+            if (PortraitNodes.FindControl(submenu, name) is { Visible: true } card)
+                shelf.Add(card);
+        var chips = new List<Control>();
+        foreach (var name in ChipNames)
+            if (PortraitNodes.FindControl(submenu, name) is { Visible: true } chip)
+                chips.Add(chip);
+
         const float cardW = 368f;
         const float cardH = 490f;
-        const float gap = 24f;
-        var scale = Math.Min(
-            1f,
-            (canvas.X - 2f * PortraitHudMetrics.EdgeMargin - 2f * gap) / (3f * cardW)
-        );
-        var rowWidth = 3f * cardW * scale + 2f * gap;
-        var rowX = PortraitHudMetrics.CenterX(canvas.X, rowWidth);
-        var statsH = 200f * scale;
-        var totalH = cardH * scale + 36f + statsH;
-        var rowY = bandTop + (bandBottom - bandTop - totalH) * 0.5f;
+        const float gap = 28f;
+        const int columns = 2;
+        var rows = Math.Max(1, (shelf.Count + columns - 1) / columns);
+        var chipH = chips.Count > 0 ? 200f : 0f;
+        var widthScale = (canvas.X - 2f * PortraitHudMetrics.EdgeMargin - (columns - 1) * gap) / (columns * cardW);
+        var heightScale = (bandBottom - bandTop - 36f - (rows - 1) * gap) / (rows * cardH + chipH);
+        var scale = Mathf.Clamp(Math.Min(widthScale, heightScale), 0.6f, 1.6f);
+        var gridW = columns * cardW * scale + (columns - 1) * gap;
+        var gridH = rows * cardH * scale + (rows - 1) * gap;
+        var totalH = gridH + (chips.Count > 0 ? 36f + chipH * scale : 0f);
+        var x0 = PortraitHudMetrics.CenterX(canvas.X, gridW);
+        var y0 = bandTop + Math.Max(0f, (bandBottom - bandTop - totalH) * 0.5f);
 
-        for (var i = 0; i < shelf.Length; i++)
+        for (var i = 0; i < shelf.Count; i++)
         {
             var card = shelf[i];
-            if (card is null)
-                continue;
             if (card.GetParent() != submenu)
             {
                 card.GetParent().RemoveChild(card);
@@ -4045,26 +4284,40 @@ internal static class PortraitCompendium
             }
             card.PivotOffset = Vector2.Zero;
             card.Scale = Vector2.One * scale;
-            card.GlobalPosition = new Vector2(rowX + i * (cardW * scale + gap), rowY);
-        }
-        if (stats is not null)
-        {
-            if (stats.GetParent() != submenu)
-            {
-                stats.GetParent().RemoveChild(stats);
-                submenu.AddChild(stats);
-            }
-            stats.PivotOffset = Vector2.Zero;
-            stats.Scale = Vector2.One * scale;
-            stats.GlobalPosition = new Vector2(
-                PortraitHudMetrics.CenterX(canvas.X, 280f * scale),
-                rowY + cardH * scale + 36f
+            card.GlobalPosition = new Vector2(
+                x0 + i % columns * (cardW * scale + gap),
+                y0 + i / columns * (cardH * scale + gap)
             );
         }
+
+        if (chips.Count > 0)
+        {
+            const float chipW = 280f;
+            var chipRow = chips.Count * chipW * scale + (chips.Count - 1) * gap;
+            var cx = PortraitHudMetrics.CenterX(canvas.X, chipRow);
+            var cy = y0 + gridH + 36f;
+            for (var i = 0; i < chips.Count; i++)
+            {
+                var chip = chips[i];
+                if (chip.GetParent() != submenu)
+                {
+                    chip.GetParent().RemoveChild(chip);
+                    submenu.AddChild(chip);
+                }
+                chip.PivotOffset = Vector2.Zero;
+                chip.Scale = Vector2.One * scale;
+                chip.GlobalPosition = new Vector2(cx + i * (chipW * scale + gap), cy);
+            }
+        }
+
+        if (PortraitNodes.FindControl(submenu, "BackButton") is { } back)
+            PortraitNodes.PlaceBackTab(back, new Vector2(PortraitHudMetrics.EdgeMargin, PortraitDisplay.SafeTop() + 6f));
     }
 }
 
-[HarmonyPatch(typeof(MegaCrit.Sts2.Core.Nodes.Screens.MainMenu.NCompendiumSubmenu), "_Ready")]
+// _Ready ran before the patches (the submenu is built with the menu); the
+// open hook runs every time the compendium comes up.
+[HarmonyPatch(typeof(MegaCrit.Sts2.Core.Nodes.Screens.MainMenu.NCompendiumSubmenu), "OnSubmenuOpened")]
 internal static class CompendiumSubmenuPatch
 {
     private static void Postfix(object __instance)
@@ -4080,31 +4333,53 @@ internal static class PortraitAncientEvent
     private const string LoopMeta = "Sts2PortraitAncientLoop";
     private const string OptionFitMeta = "Sts2PortraitAncientOptionFit";
     private const string BgAuthoredMeta = "Sts2PortraitAncientBgAuthored";
-    private const float BgScale = 2.2f;
     private const float BubbleTopGap = 430f;
     private static readonly Vector2 BgAnchor = new(590f, 120f);
-    private static readonly Vector2 BgShift = new(-280f, 0f);
 
     // The ancient's scene is a landscape Spine composition drawn at 1.12 in
     // a full-rect container: on the phone it filled the top third and left
     // the middle of the screen black down to the options. Scale it about a
     // top-center anchor so the speaker keeps its place and the scene grows
     // down to the options; the sides crop, which the wide painting affords.
+    // Each ancient's scene is composed differently: Tezcatara is a Spine
+    // rig with the speaker right of center, Tanx (act 3) a flat 2582x1221
+    // painting with the head at its top-right. One zoom does not fit both,
+    // so the scene node's name picks the zoom and the horizontal slide.
+    private static (float scale, float shiftX, float shiftY) SceneZoom(Control bg)
+    {
+        foreach (var child in bg.GetChildren())
+        {
+            switch (child.Name.ToString())
+            {
+                case "Tezcatara":
+                    return (2.2f, -280f, 0f);
+                case "Tanx":
+                    // The head fills the painting's top edge; the scene
+                    // drops so the eyes come under the bar.
+                    return (1.6f, -350f, 300f);
+                case "Neow":
+                    // Flat painting, the face in the right third above the
+                    // water; slide it to the center and a little down.
+                    return (1.6f, -800f, 0f);
+            }
+        }
+        return (1.8f, -400f, 0f);
+    }
+
     private static void FillBackground(Control layout, Vector2 canvas)
     {
         if (PortraitNodes.FindControl(layout, "AncientBgContainer") is not { } bg)
             return;
+        var (sceneScale, sceneShiftX, sceneShiftY) = SceneZoom(bg);
         if (!bg.HasMeta(BgAuthoredMeta))
             bg.SetMeta(BgAuthoredMeta, new Vector3(bg.Position.X, bg.Position.Y, bg.Scale.X));
         var authored = bg.GetMeta(BgAuthoredMeta).AsVector3();
         var authoredScale = Math.Max(authored.Z, 0.01f);
         var local = (BgAnchor - new Vector2(authored.X, authored.Y)) / authoredScale;
-        // The speaker stands right of center in the wide painting; after the
-        // zoom its face hung on the right edge, so the scene slides left.
-        var target = BgAnchor - local * BgScale + BgShift;
+        var target = BgAnchor - local * sceneScale + new Vector2(sceneShiftX, sceneShiftY);
         bg.PivotOffset = Vector2.Zero;
-        if (Math.Abs(bg.Scale.X - BgScale) > 0.01f)
-            bg.Scale = Vector2.One * BgScale;
+        if (Math.Abs(bg.Scale.X - sceneScale) > 0.01f)
+            bg.Scale = Vector2.One * sceneScale;
         if (bg.Position.DistanceTo(target) > 1.5f)
             bg.Position = target;
     }
@@ -4133,11 +4408,34 @@ internal static class PortraitAncientEvent
             if (!hasDescription)
                 continue;
             text.AutowrapMode = TextServer.AutowrapMode.WordSmart;
-            text.CustomMinimumSize = new Vector2(text.Size.X, OptionTextHeight);
-            text.Size = new Vector2(text.Size.X, OptionTextHeight);
+            // Height from the wrapped content (Neow's Silver Crucible runs to
+            // four lines and a fixed 150 cut its last line); the fixed value
+            // is the floor so short rows keep the same plate.
+            // The label's own content height is not ready on the pass that
+            // turns wrapping on, so the height comes from the text itself:
+            // one title line plus the description wrapped at about 42
+            // characters per 830 units (measured), 47 units per line.
+            var plain = System.Text.RegularExpressions.Regex.Replace(text.Text, @"\[[^\]]*\]", "");
+            var descLines = 0;
+            foreach (var line in plain.Split('\n').Skip(1))
+                if (line.Trim().Length > 0)
+                    descLines += Math.Max(1, (int)Math.Ceiling(line.Trim().Length / 42.0));
+            var textHeight = Math.Max(OptionTextHeight, 13f + 47f * (1 + descLines));
+            try
+            {
+                var content = text.GetContentHeight();
+                if (content > 1)
+                    textHeight = Math.Max(textHeight, content + 12f);
+            }
+            catch
+            {
+                // Not laid out yet; the estimate above carries the row.
+            }
+            text.CustomMinimumSize = new Vector2(text.Size.X, textHeight);
+            text.Size = new Vector2(text.Size.X, textHeight);
             // Three text lines run 141 tall; the authored 160 plate put the
             // next row's title on the last line. The plate grows with them.
-            option.CustomMinimumSize = new Vector2(option.CustomMinimumSize.X, OptionRowHeight);
+            option.CustomMinimumSize = new Vector2(option.CustomMinimumSize.X, textHeight + (OptionRowHeight - OptionTextHeight));
         }
     }
 
@@ -4186,7 +4484,8 @@ internal static class PortraitAncientEvent
             PortraitHudMetrics.ContentTop(safeTop) + 26f,
             PortraitHudMetrics.HudBottom(safeTop) + BubbleTopGap
         );
-        var bottom = canvas.Y - PortraitDisplay.SafeBottom() - 40f;
+        // Same baseline as the footer strip on every other screen.
+        var bottom = PortraitHudMetrics.ContentBottom(canvas.Y, PortraitDisplay.SafeBottom()) - 60f;
 
         PortraitNodes.ClearAnchors(container);
         container.Position = new Vector2(10f, top);
@@ -4231,9 +4530,12 @@ internal static class PortraitAncientEvent
 
         // The "next" hint follows the bubble instead of floating at the
         // bottom edge of the screen.
+        // The hint's HBox sits 858 in from the container's left edge and is
+        // 395 wide, past the right edge of a 1180 canvas; the container
+        // slides left so the hint ends inside the margin.
         if (PortraitNodes.FindControl(layout, "FakeNextButtonContainer") is { } fakeNext)
             fakeNext.GlobalPosition = new Vector2(
-                fakeNext.GlobalPosition.X,
+                canvas.X - 858f - 395f - PortraitHudMetrics.EdgeMargin,
                 top + dialogue.Size.Y + 12f
             );
     }
@@ -4448,12 +4750,351 @@ internal static class PortraitCrystalSphere
         PortraitNodes.AssertLoop(screen, () => Apply(screen));
     }
 
+    private const float RightUiMargin = 90f;
+    private const float ProceedScale = 1.3f;
+
+    // Measured tree: Bg (2560x1200 art at 1.04) carries the 792 Sphere at its
+    // left third; Ui (1544 wide, starting at x -182) holds the footer line at
+    // the far left and RightUi (buttons, spacer, a 976-tall instruction
+    // block) at x 1101; the dialogue bubble sits at x 1291. Portrait: the
+    // sphere centered right under the bar, the button/instruction column
+    // under the sphere at 0.85, the footer line bottom-left, Proceed
+    // bottom-right, the bubble in the sphere's empty top-right corner.
     private static void Apply(Control screen)
     {
         var canvas = PortraitDisplay.CanvasSize;
         if (!PortraitDisplay.IsPortrait(canvas))
             return;
-        // Placement lands once the geometry dump has been read.
+        var safeTop = PortraitDisplay.SafeTop();
+        var contentTop = PortraitHudMetrics.ContentTop(safeTop) + 20f;
+        var contentBottom = PortraitHudMetrics.ContentBottom(canvas.Y, PortraitDisplay.SafeBottom());
+
+        var bg = PortraitNodes.FindControl(screen, "Bg");
+        var sphere = PortraitNodes.FindControl(screen, "Sphere");
+        var sphereBottom = contentTop + 824f;
+        if (bg is not null && sphere is not null)
+        {
+            var rect = sphere.GetGlobalRect();
+            var center = rect.Position + rect.Size * 0.5f;
+            var want = new Vector2(canvas.X * 0.5f, contentTop + rect.Size.Y * 0.5f);
+            if (center.DistanceTo(want) > 1.5f)
+                bg.Position += want - center;
+            sphereBottom = contentTop + rect.Size.Y;
+        }
+
+        if (PortraitNodes.FindControl(screen, "RightUi") is { } right)
+        {
+            // The column is a 395-wide VBox whose children fill its width;
+            // at that width the instruction text ran to ten lines and the
+            // description label cut it. Give the column the portrait panel
+            // width and the text wraps into a few lines under the buttons.
+            PortraitNodes.ClearAnchors(right);
+            right.PivotOffset = Vector2.Zero;
+            if (Math.Abs(right.Scale.X - 1f) > 0.01f)
+                right.Scale = Vector2.One;
+            var width = canvas.X - 2f * RightUiMargin;
+            if (Math.Abs(right.CustomMinimumSize.X - width) > 0.5f)
+                right.CustomMinimumSize = new Vector2(width, 0f);
+            if (Math.Abs(right.Size.X - width) > 0.5f)
+                right.Size = new Vector2(width, right.Size.Y);
+            var target = new Vector2(RightUiMargin, sphereBottom + 24f);
+            if (right.GlobalPosition.DistanceTo(target) > 1.5f)
+                right.GlobalPosition = target;
+            // The instruction plate's inner VBox is placed by hand (28 in,
+            // 339 wide) and never follows the plate; widen it to the plate.
+            if (PortraitNodes.FindControl(right, "Instructions")?.GetNodeOrNull<Control>("VBoxContainer") is { } inner)
+            {
+                var innerWidth = width - 56f;
+                if (Math.Abs(inner.Size.X - innerWidth) > 0.5f)
+                {
+                    inner.CustomMinimumSize = new Vector2(innerWidth, 0f);
+                    inner.Size = new Vector2(innerWidth, inner.Size.Y);
+                }
+            }
+        }
+
+        if (PortraitNodes.FindControl(screen, "DivinationsLeft") is { } left)
+        {
+            PortraitNodes.ClearAnchors(left);
+            var target = new Vector2(PortraitHudMetrics.EdgeMargin, contentBottom - 56f);
+            if (left.GlobalPosition.DistanceTo(target) > 1.5f)
+                left.GlobalPosition = target;
+        }
+
+        if (PortraitNodes.FindControl(screen, "ProceedButton") is { } proceed)
+        {
+            PortraitNodes.ClearAnchors(proceed);
+            proceed.PivotOffset = Vector2.Zero;
+            if (Math.Abs(proceed.Scale.X - ProceedScale) > 0.01f)
+                proceed.Scale = Vector2.One * ProceedScale;
+            var w = (proceed.Size.X > 1f ? proceed.Size.X : 269f) * ProceedScale;
+            var h = (proceed.Size.Y > 1f ? proceed.Size.Y : 108f) * ProceedScale;
+            var target = new Vector2(canvas.X - w - PortraitHudMetrics.EdgeMargin, contentBottom - h - 8f);
+            if (proceed.GlobalPosition.DistanceTo(target) > 1.5f)
+                proceed.GlobalPosition = target;
+        }
+
+        if (screen.FindChild("Dialogue", recursive: false, owned: false) is Node2D dialogue)
+        {
+            var target = new Vector2(canvas.X - 300f, contentTop + 90f);
+            if (dialogue.Position.DistanceTo(target) > 1.5f)
+                dialogue.Position = target;
+        }
+    }
+}
+
+// Loot rows show the selection brackets whenever they hold focus; after a
+// fight ended by a card drag the first row came up bracketed and stayed so
+// until the next touch (BUG-054). A finger has no hover to speak of, so the
+// brackets never appear on reward rows on the phone; every other reticle
+// (targeting, cards) keeps its behavior.
+[HarmonyPatch(typeof(MegaCrit.Sts2.Core.Nodes.Combat.NSelectionReticle), "OnSelect")]
+internal static class RewardReticlePatch
+{
+    private static bool Prefix(Control __instance)
+    {
+        if (!OperatingSystem.IsAndroid())
+            return true;
+        Node node = __instance;
+        for (var i = 0; i < 3 && node is not null; i++)
+        {
+            node = node.GetParent();
+            if (node?.GetType().Name == "NRewardButton")
+                return false;
+        }
+        return true;
+    }
+}
+
+// Timeline screen: the epoch row lives in a zoom container drawn at 1.2 about
+// the screen center (a single epoch card came out 270 wide), the back tab is
+// authored bottom-left and the reminder line is a 1716-wide label centered at
+// the bottom edge. The zoom container is static in the game's code (only its
+// child scrolls horizontally), so a one-shot 1.9 is safe; the tab and the
+// reminder move onto the footer strip.
+[HarmonyPatch(typeof(MegaCrit.Sts2.Core.Nodes.Screens.Timeline.NTimelineScreen), "OnSubmenuOpened")]
+internal static class TimelineScreenPatch
+{
+    private const float ZoomScale = 1.9f;
+
+    private static void Postfix(Control __instance)
+        => PortraitNodes.AssertLoop(__instance, () => Apply(__instance));
+
+    private static void Apply(Control screen)
+    {
+        var canvas = PortraitDisplay.CanvasSize;
+        if (!PortraitDisplay.IsPortrait(canvas))
+            return;
+        var contentBottom = PortraitHudMetrics.ContentBottom(canvas.Y, PortraitDisplay.SafeBottom());
+        var tabTop = contentBottom - 60f - 110f;
+
+        if (PortraitNodes.FindControl(screen, "WhatsZoomed") is { } zoom
+            && Math.Abs(zoom.Scale.X - ZoomScale) > 0.01f)
+        {
+            zoom.PivotOffset = Vector2.Zero;
+            zoom.Scale = Vector2.One * ZoomScale;
+        }
+
+        if (PortraitNodes.FindControl(screen, "BackButton") is { } back)
+            PortraitNodes.PlaceBackTab(back, new Vector2(PortraitHudMetrics.EdgeMargin, tabTop));
+
+        // The epoch story's Continue is a 260x58 plate at 1x near the bottom
+        // edge; thumb size on the strip baseline.
+        foreach (var name in new[] { "CloseButton", "ConfirmButton" })
+        {
+            if (PortraitNodes.FindControl(screen, name) is not { } plate || plate.Size.X <= 1f)
+                continue;
+            const float plateScale = 1.6f;
+            var w = plate.Size.X * plateScale;
+            var h = plate.Size.Y * plateScale;
+            plate.PivotOffset = Vector2.Zero;
+            if (Math.Abs(plate.Scale.X - plateScale) > 0.01f)
+                plate.Scale = Vector2.One * plateScale;
+            var target = new Vector2((canvas.X - w) * 0.5f, contentBottom - 60f - h);
+            if (plate.GlobalPosition.DistanceTo(target) > 1.5f)
+                plate.GlobalPosition = target;
+        }
+
+        if (PortraitNodes.FindControl(screen, "EpochReminderText") is { } holder)
+        {
+            var target = new Vector2(canvas.X * 0.5f, tabTop - 150f);
+            if (holder.GlobalPosition.DistanceTo(target) > 1.5f)
+                holder.GlobalPosition = target;
+            if (holder.GetNodeOrNull<RichTextLabel>("ReminderLabel") is { } label && !label.HasMeta("Sts2PortraitWrapped"))
+            {
+                label.SetMeta("Sts2PortraitWrapped", true);
+                label.AutowrapMode = TextServer.AutowrapMode.WordSmart;
+                label.Size = new Vector2(canvas.X - 120f, 120f);
+                label.Position = new Vector2(-(canvas.X - 120f) * 0.5f, 0f);
+            }
+        }
+    }
+}
+
+// Confirmation modals ("Are you sure?", the profile delete prompt, the
+// quit prompt) are authored about 470 wide with two 58-tall plates, centered
+// on the canvas: fine for a mouse, small for a thumb (BUG-057). Every modal
+// enters through NModalContainer.Add, which then calls ShowBackstop; a
+// detour on Add itself aborted the process at startup (destroyed-mutex
+// FORTIFY in the handoff), so the hook is ShowBackstop: the container's
+// newest Control child is the modal, and a frame later (its own _Ready has
+// sized it) it scales 1.5 about its center, which keeps it centered.
+[HarmonyPatch(typeof(MegaCrit.Sts2.Core.Nodes.CommonUi.NModalContainer), "ShowBackstop")]
+internal static class ModalAddPatch
+{
+    private const float ModalScale = 1.5f;
+
+    private static void Postfix(Node __instance)
+    {
+        if (!PortraitDisplay.IsPortrait(PortraitDisplay.CanvasSize))
+            return;
+        Control modal = null;
+        foreach (var child in __instance.GetChildren())
+            if (child is Control c && c.Name != "Backstop")
+                modal = c;
+        if (modal is null)
+            return;
+        PortraitNodes.After(modal, 0.05, () =>
+        {
+            if (modal.Size.X < 1f || modal.HasMeta("Sts2PortraitModalScaled"))
+                return;
+            modal.SetMeta("Sts2PortraitModalScaled", true);
+            var center = modal.GetGlobalRect().GetCenter();
+            modal.PivotOffset = modal.Size * 0.5f;
+            modal.Scale = Vector2.One * ModalScale;
+            var drift = modal.GetGlobalRect().GetCenter() - center;
+            if (drift.Length() > 0.5f)
+                modal.GlobalPosition -= drift;
+        });
+    }
+}
+
+// Creature hitboxes follow the sprite's Bounds node (a small slime is about
+// 60 units wide), so a card released a thumb's width off the sprite stayed
+// in targeting mode (BUG-060). On the phone every hitbox grows to a touch
+// minimum about its own center whenever the game re-derives it; the
+// selection reticle and intents keep the sprite's true bounds.
+[HarmonyPatch(typeof(NCreature), "UpdateBounds", typeof(Node))]
+internal static class CreatureHitboxPatch
+{
+    private static readonly Vector2 MinHitbox = new(200f, 220f);
+
+    private static void Postfix(NCreature __instance)
+    {
+        if (!OperatingSystem.IsAndroid())
+            return;
+        var hitbox = __instance.Hitbox;
+        if (hitbox is null)
+            return;
+        var size = hitbox.Size;
+        if (size.X >= MinHitbox.X && size.Y >= MinHitbox.Y)
+            return;
+        // Grow sideways about the center and downward only: the intent icon
+        // (a hover control above the head) sits right over the sprite, and a
+        // box grown upward put releases there on the intent instead. Below
+        // the feet is floor, which the finger can use.
+        var grown = new Vector2(Math.Max(size.X, MinHitbox.X), Math.Max(size.Y, MinHitbox.Y));
+        var top = hitbox.GlobalPosition.Y;
+        var centerX = hitbox.GlobalPosition.X + size.X * 0.5f;
+        hitbox.Size = grown;
+        hitbox.GlobalPosition = new Vector2(centerX - grown.X * 0.5f, top);
+    }
+}
+
+// Card Library (compendium): the grid starts at the top edge, so its first
+// row sat under the cutout band, and the back tab parked bottom-left. The
+// grid's YOffset moves the first row under the safe inset (no bar on this
+// screen) and the tab goes onto the footer strip baseline.
+[HarmonyPatch(typeof(MegaCrit.Sts2.Core.Nodes.Screens.CardLibrary.NCardLibrary), "OnSubmenuOpened")]
+internal static class CardLibraryPatch
+{
+    private static void Postfix(Control __instance)
+    {
+        var canvas = PortraitDisplay.CanvasSize;
+        if (!PortraitDisplay.IsPortrait(canvas))
+            return;
+        try
+        {
+            if (!__instance.HasMeta("Sts2PortraitLibraryOffset")
+                && PortraitNodes.FindControl(__instance, "CardGrid") is { } grid
+                && grid.Size.Y > 1f)
+            {
+                __instance.SetMeta("Sts2PortraitLibraryOffset", true);
+                var contentTop = PortraitDisplay.SafeTop() + 24f;
+                var firstRowTop = grid.GlobalPosition.Y + 80f;
+                var current = (int)(Traverse.Create(grid).Property("YOffset").GetValue() ?? 0);
+                var shift = (int)Math.Max(0f, contentTop - firstRowTop);
+                Traverse.Create(grid).Property("YOffset").SetValue(current + shift);
+                AccessTools.Method(grid.GetType(), "ReflowColumns")?.Invoke(grid, null);
+            }
+            // The sidebar's tickboxes own the bottom-left corner here, so the
+            // tab takes the bottom-right, under the scrollbar's end.
+            if (PortraitNodes.FindControl(__instance, "BackButton") is { } back)
+            {
+                var baseline = PortraitHudMetrics.ContentBottom(canvas.Y, PortraitDisplay.SafeBottom()) - 60f;
+                PortraitNodes.PlaceBackTab(back, new Vector2(canvas.X - 200f - PortraitHudMetrics.EdgeMargin, baseline - 110f));
+            }
+        }
+        catch (Exception e)
+        {
+            PatchHelper.Log($"[Portrait] card library pass failed: {e.Message}");
+        }
+    }
+}
+
+// Timeline intro (first epoch unlock): a full-rect rich label holding one
+// long centered line that ran off both edges, and a 260x58 Proceed plate
+// tweened to y 920, above the text. AnimateTutorial builds one tween for
+// the text reveal, the button fade and the button slide; the copy below
+// keeps the reveal and the fade, drops the slide, wraps the text inside
+// side margins and parks the plate at 1.6x on the footer strip baseline.
+[HarmonyPatch(typeof(MegaCrit.Sts2.Core.Nodes.Screens.Timeline.NTimelineTutorial), "AnimateTutorial")]
+internal static class TimelineTutorialPatch
+{
+    private static void Postfix(Control __instance)
+    {
+        var canvas = PortraitDisplay.CanvasSize;
+        if (!PortraitDisplay.IsPortrait(canvas))
+            return;
+        try
+        {
+            var t = Traverse.Create(__instance);
+            var text = t.Field("_text").GetValue<Control>();
+            var button = t.Field("_acknowledgeButton").GetValue<Control>();
+            if (text is null || button is null)
+                return;
+            if (t.Field("_tween").GetValue() is Tween old && old.IsValid())
+                old.Kill();
+
+            if (text is RichTextLabel rich)
+                rich.AutowrapMode = TextServer.AutowrapMode.WordSmart;
+            text.OffsetLeft = 60f;
+            text.OffsetRight = -60f;
+
+            const float scale = 1.6f;
+            var w = (button.Size.X > 1f ? button.Size.X : 260f) * scale;
+            var h = (button.Size.Y > 1f ? button.Size.Y : 58f) * scale;
+            button.PivotOffset = Vector2.Zero;
+            button.Scale = Vector2.One * scale;
+            button.GlobalPosition = new Vector2(
+                (canvas.X - w) * 0.5f,
+                PortraitHudMetrics.ContentBottom(canvas.Y, PortraitDisplay.SafeBottom()) - 60f - h
+            );
+
+            var tween = __instance.CreateTween();
+            tween.TweenProperty(text, "visible_ratio", 1f, 2.0).SetEase(Tween.EaseType.Out).SetTrans(Tween.TransitionType.Quad);
+            tween.Parallel().TweenProperty(text, "modulate:a", 1f, 1.0);
+            tween.Chain().TweenCallback(Callable.From(() =>
+            {
+                try { Traverse.Create(button).Method("Enable").GetValue(); } catch { }
+            }));
+            tween.Parallel().TweenProperty(button, "modulate:a", 1f, 0.3).SetEase(Tween.EaseType.Out).SetTrans(Tween.TransitionType.Cubic).SetDelay(1.0);
+            t.Field("_tween").SetValue(tween);
+        }
+        catch (Exception e)
+        {
+            PatchHelper.Log($"[Portrait] timeline tutorial pass failed: {e.Message}");
+        }
     }
 }
 
@@ -4498,13 +5139,7 @@ internal static class GridSelectTickboxPatch
                     PatchHelper.Log($"[Portrait] grid offset failed: {ex.GetBaseException().Message}");
                 }
             }
-            if (PortraitNodes.FindControl(screen, "Upgrades") is { Visible: true } upgrades
-                && upgrades.Size.X > 1f)
-            {
-                upgrades.PivotOffset = new Vector2(0f, upgrades.Size.Y);
-                if (Math.Abs(upgrades.Scale.X - 2.2f) > 0.01f)
-                    upgrades.Scale = Vector2.One * 2.2f;
-            }
+            PortraitGridStrip.Place(screen);
         });
     }
 }
@@ -4546,6 +5181,7 @@ internal static class ChooseACardScreenPatch
 
 internal static class PortraitRewards
 {
+    private const string AuthoredMeta = "Sts2PortraitRewardsAuthored";
     private const string LoopMeta = "Sts2PortraitRewardsLoop";
 
     // Set by the map pass when it hides a live loot screen under the map;
@@ -4616,8 +5252,32 @@ internal static class PortraitRewards
 
         if (PortraitNodes.FindControl(screen, "Rewards") is { } panel)
         {
-            var baseW = panel.Size.X > 1f ? panel.Size.X : 526f;
-            var baseH = panel.Size.Y > 1f ? panel.Size.Y : 640f;
+            // The authored panel (526x640) masks a 484-tall list: four and a
+            // half rows. A five-reward loot (the crystal sphere's) hid its
+            // last row behind the mask edge. The panel and the mask grow by
+            // the missing rows before the panel is scaled to the band.
+            if (!panel.HasMeta(AuthoredMeta))
+                panel.SetMeta(AuthoredMeta, panel.Size);
+            var authored = panel.GetMeta(AuthoredMeta).AsVector2();
+            var mask = PortraitNodes.FindControl(panel, "RewardContainerMask");
+            var list = PortraitNodes.FindControl(panel, "RewardsContainer");
+            var extra = 0f;
+            if (mask is not null && list is not null)
+            {
+                if (!mask.HasMeta(AuthoredMeta))
+                    mask.SetMeta(AuthoredMeta, mask.Size);
+                var maskAuthored = mask.GetMeta(AuthoredMeta).AsVector2();
+                var needed = list.Size.Y + 70f;
+                extra = Math.Max(0f, needed - maskAuthored.Y);
+                var maskSize = new Vector2(maskAuthored.X, maskAuthored.Y + extra);
+                if (mask.Size.DistanceTo(maskSize) > 0.5f)
+                    mask.Size = maskSize;
+            }
+            var panelSize = new Vector2(authored.X, authored.Y + extra);
+            if (panel.Size.DistanceTo(panelSize) > 0.5f)
+                panel.Size = panelSize;
+            var baseW = panelSize.X > 1f ? panelSize.X : 526f;
+            var baseH = panelSize.Y > 1f ? panelSize.Y : 640f;
             // The proceed strip keeps the lower part of the band.
             var scale = PortraitHudMetrics.FillScale(
                 baseW,
@@ -4867,8 +5527,10 @@ internal static class ProceedButtonPatch
         // arrow ON the resting hero's chest. The arrow always drops to the
         // bottom content band, under any room's character art.
         var height = (button.Size.Y > 1f ? button.Size.Y : 108f) * Math.Max(button.Scale.Y, 1f);
+        // Same baseline as the grid footer strip: 8 above the content bottom
+        // put the arrow on the gesture edge.
         var floorY = PortraitHudMetrics.ContentBottom(canvas.Y, PortraitDisplay.SafeBottom())
-            - height - 8f;
+            - height - 60f;
         __result.Y = Math.Max(__result.Y, floorY);
     }
 
@@ -4888,6 +5550,7 @@ internal static class ProceedButtonPatch
 internal static class PortraitGameOver
 {
     private const string LoopMeta = "Sts2PortraitGameOverLoop";
+    private const float SummaryScale = 1.2f;
 
     internal static void EnsureLoop(Control screen)
     {
@@ -4909,8 +5572,18 @@ internal static class PortraitGameOver
         if (!PortraitDisplay.IsPortrait(canvas))
             return;
         var safeBottom = PortraitDisplay.SafeBottom();
-        var nextBottom = PortraitHudMetrics.ContentBottom(canvas.Y, safeBottom);
-        foreach (var name in new[] { "ContinueButton", "LeaderboardButton" })
+        // The summary (quote, score lines, score bar, discoveries) is a
+        // 1920-wide CenterContainer drawn at 1.0; on the phone it read as a
+        // strip of small print. Scale it about its center; the quote line is
+        // the widest element and still fits the canvas at 1.2.
+        if (PortraitNodes.FindControl(screen, "CenterContainer") is { } summary && summary.Size.X > 1f)
+        {
+            summary.PivotOffset = summary.Size * 0.5f;
+            if (Math.Abs(summary.Scale.X - SummaryScale) > 0.01f)
+                summary.Scale = Vector2.One * SummaryScale;
+        }
+        var nextBottom = PortraitHudMetrics.ContentBottom(canvas.Y, safeBottom) - 60f;
+        foreach (var name in new[] { "ContinueButton", "LeaderboardButton", "ViewRunButton", "MainMenuButton" })
         {
             if (PortraitNodes.FindControl(screen, name) is not { Visible: true } button)
                 continue;

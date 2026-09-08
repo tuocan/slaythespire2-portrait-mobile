@@ -604,10 +604,13 @@ visual collisions and unplayable states are the biggest bug class.
   authored transform in meta so repeat passes do not compound; the dialogue
   block hangs 430 under the bar so the face shows between the bar and the
   bubble. Verified on device with Tezcatara (act 2): face centered above the
-  bubble, scene to the options, text white. Open item: check Neow (act 1)
-  and the act 3 ancient with the same anchor; the shift may need a per
-  ancient value.
-- **Status**: verified (Tezcatara)
+  bubble, scene to the options, text white. The act 3 ancient (Tanx, a
+  flat 2582x1221 painting with the head at its top edge) needed its own
+  framing, so the scene node's name now picks zoom and slide (Tezcatara
+  2.2x/-280, Tanx 1.6x/-350/+300, others 1.8x/-400); the option block ends
+  on the shared strip baseline. Verified on device for both. Neow (act 1)
+  still to check with the default entry.
+- **Status**: verified (Tezcatara, Tanx)
 - **Fixed in**: 0.4.0
 
 ## BUG-050: combat top bar stayed expanded on the loot screen
@@ -644,8 +647,178 @@ visual collisions and unplayable states are the biggest bug class.
   Proceed).
 - **Symptom**: sphere on the left, the button column and instructions cut
   at the right edge, "divinations remain" cut at the bottom-left.
-- **Plan**: portrait composition with the sphere centered in the upper
-  band, the two buttons in a row under it, instructions under those and
-  Proceed at the bottom; geometry to be measured from the tree dump the
-  open hook logs.
-- **Status**: open
+- **Fix**: PortraitCrystalSphere (AssertLoop from AfterOverlayOpened): the
+  Bg art slides so the sphere centers right under the bar; RightUi (a
+  VBox whose children fill its width) takes the panel width at 1.0 with
+  its hand-placed inner instruction VBox widened to match, placed under
+  the sphere; the footer line sits bottom-left, Proceed bottom-right at
+  1.3x, the dialogue bubble in the sphere's top-right corner. Verified on
+  device: sphere, both buttons, full instructions, tile reveals, footer
+  count, session end into the loot.
+- **Status**: verified
+- **Fixed in**: 0.4.0
+
+## BUG-053: loot with five rewards hid the last row
+
+- **Where**: the crystal sphere session pays out four gold rewards and a
+  card; the authored loot panel (526x640) masks a 484-tall list (four and
+  a half rows), so "Add a card" sat behind the mask edge and the Skip
+  plate overlapped the panel's bottom frame.
+- **Fix**: the rewards pass grows the mask and the panel by the missing
+  rows (authored sizes remembered in meta) before scaling to the band.
+  Verified on device: five rows, Skip under the panel.
+- **Status**: verified
+- **Fixed in**: 0.4.0
+
+## BUG-054: focus brackets stay on the first loot row after a fight
+
+- **Symptom**: on a loot that follows a fight ended by a card drag, the
+  first reward row shows the yellow selection brackets (hover/focus
+  visual) until something else is touched; a loot reached by resume does
+  not show them.
+- **Notes**: the touch bridge parks the emulated pointer off-canvas after
+  every release, so this is not a stuck hover from the finger; the game
+  hands initial focus to the first reward.
+- **Fix**: an Android-only prefix on NSelectionReticle.OnSelect returns
+  early when the reticle belongs to an NRewardButton; targeting and card
+  reticles are untouched. Verified on device on the next loot after a
+  drag-ended fight: no brackets.
+- **Status**: verified
+- **Fixed in**: 0.4.0
+
+## BUG-055: grid screens and rest site parked their controls on the gesture edge
+
+- **Symptom** (user): on the smith grid the View Upgrades box, the caption
+  and the tabs sat at the very bottom of the phone, the confirm tick
+  higher up; the rest site's prompt and plates hugged the bottom edge too.
+  "Neither far up nor far down" is the mobile rule.
+- **Fix**: a shared footer strip (PortraitGridStrip) 60 above the content
+  bottom for every grid screen: back tab and preview cancel left, the
+  tickbox beside them on the same center line, the caption at 1.5x above
+  them, confirm ticks right on the same baseline, on a dark plate that the
+  grid's viewport ends at (the last row scrolls clear). The rest site's
+  plates use the same baseline; the deck view's sort row and first grid
+  row start from the safe inset. DeckViewSortRowPatch had lost its
+  HarmonyPatch attribute for a while (the audit said 56/57); restored, and
+  MainMenuAspectWritePatch is registered now. Verified on device at 20:9
+  and 16:9 (deck view), smith grid with and without a preview, rest site.
+- **Status**: verified
+- **Fixed in**: 0.4.0
+
+## BUG-056: shop panel's lower half stayed over the merchant room
+
+- **Symptom**: after leaving the shop (and right after entering the room
+  on a resume) the lower half of the inventory panel, cards and shelves
+  included, hung over the room scene; Proceed was covered.
+- **Cause**: the inventory parks its slots at y -1000 (its authored
+  height) in _Ready and slides there on Close; the portrait panel is about
+  2100 tall, so 1100 of it stayed on screen.
+- **Fix**: a Close postfix swaps the game's tween for one that slides the
+  panel fully above the screen, and the merchant room loop keeps a closed
+  inventory's panel parked above the screen (resting state after resume).
+  Verified on device: clean room after resume and after open/close.
+- **Status**: verified
+- **Fixed in**: 0.4.0
+
+## BUG-057: confirmation modals ("Are you sure?") are authored small
+
+- **Where**: main menu Abandon Run confirmation (and, by construction, the
+  other NModal dialogs).
+- **Symptom**: the panel is about 40 percent of the canvas width with two
+  small No/Yes plates; fine for a mouse, small for a thumb.
+- **Fix**: every modal enters through NModalContainer.Add, which calls
+  ShowBackstop; a postfix on ShowBackstop scales the container's newest
+  modal child 1.5x about its center a frame later (ModalAddPatch).
+  A detour on Add itself made the process abort at startup (FORTIFY:
+  pthread_mutex_lock on a destroyed mutex during the launcher handoff,
+  every boot); the hook moved one call down and the abort is gone.
+  Verified on device: Abandon Run prompt at 1.5x, centered, No/Yes at
+  thumb size, boot clean.
+- **Status**: verified
+- **Fixed in**: 0.4.0
+
+## BUG-058: Timeline intro text ran off both edges, Proceed tiny above it
+
+- **Where**: first epoch unlock after a run (main menu Timeline row).
+- **Cause**: NTimelineTutorial holds one long centered line in a full-rect
+  label with wrapping off and tweens a 260x58 plate to y 920.
+- **Fix**: postfix on AnimateTutorial rebuilds the tween without the plate
+  slide, wraps the text inside 60-unit side margins and parks the plate
+  at 1.6x on the footer strip baseline. Verified on device.
+- **Status**: verified
+- **Fixed in**: 0.4.0
+
+## BUG-059: game over screen kept the combat bar and End Turn, buttons hidden
+
+- **Symptom**: after a death the expanded combat bar stayed up, the End Turn
+  plate sat half on the summary at the bottom-right, the summary block was
+  small print and the run-end buttons were off the strip.
+- **Fix**: NGameOverScreen visible counts as an eclipse (compact bar, hand
+  and End Turn hidden); the summary CenterContainer scales 1.2 about its
+  center; Continue, View Run, Unlock/Main Menu and Leaderboard stack at
+  1.8x from the strip baseline. Verified on device through a full death
+  (lowhp dev cheat): defeat banner, summary, Unlock/View Run plates.
+- **Status**: verified
+- **Fixed in**: 0.4.0
+
+## BUG-060: small enemies are hard to drop cards on with a finger
+
+- **Where**: act 1 slimes (a 1/12 hp slime is about 60 units wide).
+- **Symptom**: a drag released a thumb's width off the sprite left the card
+  in targeting mode (arrow up) and the next tap cancelled it; the same drag
+  onto the sprite's body played the card.
+- **Fix**: a postfix on NCreature.UpdateBounds(Node) grows every hitbox to
+  at least 200x220 on Android, sideways about the center and downward only
+  (the intent icon is a hover control right above the head; a box grown
+  upward put releases there on the intent instead). Reticle and intents
+  keep the sprite's true bounds. Verified on device: a Strike released 60
+  units below a 7-hp slime's feet played it.
+- **Status**: verified
+- **Fixed in**: 0.4.0
+
+## BUG-061: main menu row keeps the hover reticle after Save and Quit
+
+- **Symptom**: back on the main menu after Save and Quit, the wing reticle
+  sat on "Abandon Run" although nothing was hovered (touch has no hover).
+- **Notes**: the game focuses a row on return; same family as BUG-054.
+- **Fix**: MainMenuReticlePatch keeps both wings hidden on Android. The
+  focused row's gold label color still shows after Save and Quit (the
+  game's focus color); minor, left as is.
+- **Status**: verified (wings)
+- **Fixed in**: 0.4.0
+
+## BUG-062: Compendium shelf drawn as a landscape row, pass never installed
+
+- **Symptom**: the compendium showed a five-wide row of cards cut at both
+  edges with the chips below; the portrait pass (three cards plus a stats
+  chip) targeted an older layout and hooked _Ready, which had already run
+  when the patches loaded.
+- **Fix**: the pass hooks OnSubmenuOpened, moves the four shelf cards and
+  the three chips to the submenu root and lays them out as a 2x2 grid with
+  the chip row under it, scaled to the band; back tab at the top. Verified
+  on device.
+- **Status**: verified
+- **Fixed in**: 0.4.0
+
+## BUG-063: Card Library grid started under the cutout, back tab bottom-left
+
+- **Fix**: CardLibraryPatch (OnSubmenuOpened) shifts the grid's YOffset so
+  the first row starts under the safe inset and parks the back tab on the
+  footer strip at the bottom-right (the sidebar's tickboxes own the
+  bottom-left). Verified on device.
+- **Status**: verified
+- **Fixed in**: 0.4.0
+
+## BUG-064: Relic Collection list bounced up and down on its own
+
+- **Symptom** (user): the relic collection scrolled itself up and down
+  continuously.
+- **Cause**: the touch pass "lifts" whatever sits in the bottom gesture
+  strip; the scrollable Content reaches the strip by design and its
+  NScrollableContainer drives the position every frame, so the two fought
+  ("lifted 'Content' 1938 units" twice per pass).
+- **Fix**: LiftOutOfGestureStrip skips anything under an
+  NScrollableContainer. Verified on device: two frames a second apart
+  identical, no lift lines in the log.
+- **Status**: verified
+- **Fixed in**: 0.4.0

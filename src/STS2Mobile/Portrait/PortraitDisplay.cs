@@ -107,6 +107,37 @@ internal static class PortraitDisplay
                 // this ends the combat through the game's own death pipeline
                 // (LoseHpInternal never fires death events, so the HP write is
                 // safe and the kill still happens the legitimate way).
+                // Dev cheat: user://sts2_lowhp puts every player creature at
+                // 1 hp with no block, so the next enemy turn ends the run
+                // through the game's own death pipeline (game over screen).
+                var lowHpTrigger = "user://sts2_lowhp";
+                if (Godot.FileAccess.FileExists(lowHpTrigger))
+                {
+                    DirAccess.RemoveAbsolute(lowHpTrigger);
+                    try
+                    {
+                        var cmType = HarmonyLib.AccessTools.TypeByName(
+                            "MegaCrit.Sts2.Core.Combat.CombatManager");
+                        var cm = cmType?.GetProperty("Instance")?.GetValue(null);
+                        var state = HarmonyLib.Traverse.Create(cm).Field("_state").GetValue();
+                        var players = HarmonyLib.Traverse.Create(state).Property("PlayerCreatures").GetValue()
+                            as System.Collections.IEnumerable;
+                        var hurt = 0;
+                        if (players is not null)
+                            foreach (var creature in players)
+                            {
+                                var t = HarmonyLib.Traverse.Create(creature);
+                                t.Property("CurrentHp").SetValue(1);
+                                try { t.Property("Block").SetValue(0); } catch { }
+                                hurt++;
+                            }
+                        PatchHelper.Log($"[Portrait] lowhp cheat: {hurt} player creature(s) at 1 hp");
+                    }
+                    catch (Exception e)
+                    {
+                        PatchHelper.Log($"[Portrait] lowhp cheat failed: {e.Message}");
+                    }
+                }
                 var weakenTrigger = "user://sts2_weaken";
                 if (Godot.FileAccess.FileExists(weakenTrigger))
                 {
@@ -262,15 +293,28 @@ internal static class PortraitDisplay
                     var wanted = Godot.FileAccess.GetFileAsString(dumpTrigger).Trim();
                     DirAccess.RemoveAbsolute(dumpTrigger);
                     Node found = null;
+                    // "type:Class:N" picks the Nth match (1-based) of that class.
+                    var wantIndex = 1;
+                    var byType = wanted.StartsWith("type:", StringComparison.Ordinal);
+                    var wantName = byType ? wanted[5..] : wanted;
+                    if (byType && wantName.Contains(':'))
+                    {
+                        var parts = wantName.Split(':');
+                        wantName = parts[0];
+                        int.TryParse(parts[1], out wantIndex);
+                    }
+                    var seen = 0;
                     void Find(Node n, int depth)
                     {
                         if (found is not null || depth > 14)
                             return;
-                        var byType = wanted.StartsWith("type:", StringComparison.Ordinal);
-                        if (n is Control && (byType ? n.GetType().Name == wanted[5..] : n.Name == wanted))
+                        if (n is Control && (byType ? n.GetType().Name == wantName : n.Name == wantName))
                         {
-                            found = n;
-                            return;
+                            if (++seen >= wantIndex)
+                            {
+                                found = n;
+                                return;
+                            }
                         }
                         foreach (var child in n.GetChildren())
                             Find(child, depth + 1);

@@ -20,18 +20,12 @@ jobs:
       - name: Install System Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y python3 python3-pip python3-venv zip build-essential scons cmake ninja-build
+          sudo apt-get install -y python3 python3-pip python3-venv zip unzip curl build-essential scons cmake ninja-build
 
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '9.0.x'
-
-      - name: Install Android .NET Workload & Tools
-        run: |
-          dotnet workload install android --ignore-failed-sources || true
-          dotnet tool install -g csharpier
-          echo "$HOME/.dotnet/tools" >> $GITHUB_PATH
 
       - name: Setup JDK 17
         uses: actions/setup-java@v4
@@ -69,7 +63,7 @@ jobs:
         run: |
           export ANDROID_HOME="$ANDROID_SDK_ROOT"
           export ANDROID_NDK_ROOT="$ANDROID_SDK_ROOT/ndk/28.1.13356709"
-          
+
           if [ ! -f "android/libs/release/godot-lib.template_release.aar" ]; then
             cd vendor/godot/platform/android/java
             ./gradlew assembleTemplateRelease
@@ -78,72 +72,85 @@ jobs:
             find vendor/godot/platform/android/java -name "*.aar" -exec cp {} android/libs/release/godot-lib.template_release.aar \;
           fi
 
-          # Force rebuild if either libgodot_android.so or libmonosgen-2.0.so is missing
-          if [ ! -f "android/libs/release/arm64-v8a/libgodot_android.so" ] || [ ! -f "android/libs/release/arm64-v8a/libmonosgen-2.0.so" ]; then
+          if [ ! -f "android/libs/release/arm64-v8a/libgodot_android.so" ]; then
             echo "Godot native libraries missing from cache. Rebuilding Godot engine..."
             ./scripts/build-godot.sh
           else
-            echo "All Godot native libraries present in cache. Skipping rebuild."
+            echo "Godot native libraries present in cache. Skipping rebuild."
           fi
 
-      - name: Build Native C/C++ Modules (libsts2.so, etc.)
+      - name: Download and Stage Android Mono Runtime & BCL
         run: |
-          export ANDROID_NDK_ROOT="$ANDROID_SDK_ROOT/ndk/28.1.13356709"
-          if [ -d "native" ]; then
-            for dir in native/*/; do
-              if [ -f "${dir}CMakeLists.txt" ]; then
-                echo "Building C++ module in $dir"
-                mkdir -p "${dir}build"
-                (cd "${dir}build" && cmake -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_ROOT/build/cmake/android.toolchain.cmake" -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-35 -G Ninja .. && ninja) || true
-              elif [ -f "${dir}build.sh" ]; then
-                echo "Running build.sh in $dir"
-                (cd "$dir" && chmod +x build.sh && ./build.sh) || true
-              fi
-            done
-          fi
+          DOTNET_VERSION="9.0.0"
+          PACKAGE="microsoft.netcore.app.runtime.mono.android-arm64"
+          URL="https://api.nuget.org/v3-flatcontainer/${PACKAGE}/${DOTNET_VERSION}/${PACKAGE}.${DOTNET_VERSION}.nupkg"
 
-      - name: Restore Managed Assemblies & Download Android Mono Runtime
-        run: |
-          dotnet restore src/STS2Mobile/STS2Mobile.csproj -r android-arm64
-          dotnet publish src/STS2Mobile/STS2Mobile.csproj -c Release -r android-arm64 --self-contained false || dotnet publish src/STS2Mobile/STS2Mobile.csproj -c Release
+          mkdir -p /tmp/mono-runtime
+          echo "Downloading $PACKAGE $DOTNET_VERSION..."
+          curl -fsSL -o /tmp/mono-runtime/runtime.zip "$URL"
+          unzip -q /tmp/mono-runtime/runtime.zip -d /tmp/mono-runtime/extracted
 
-      - name: Collect All Native Shared Libraries (.so) & BCL Assemblies (.dll)
-        run: |
-          export ANDROID_NDK_ROOT="$ANDROID_SDK_ROOT/ndk/28.1.13356709"
-          
           mkdir -p android/libs/release/arm64-v8a
-          mkdir -p android/src/main/jniLibs/arm64-v8a
-          mkdir -p android/src/mono/jniLibs/arm64-v8a
           mkdir -p android/assets/dotnet_bcl
 
-          # 1. Sweep and copy ALL .so files from vendor/godot, native, upstream, nuget, dotnet, and NDK
-          find vendor/godot -name "*.so" -exec cp -v {} android/libs/release/arm64-v8a/ \; 2>/dev/null || true
-          find native -name "*.so" -exec cp -v {} android/libs/release/arm64-v8a/ \; 2>/dev/null || true
-          find upstream -name "*.so" -exec cp -v {} android/libs/release/arm64-v8a/ \; 2>/dev/null || true
-          find ~/.nuget/packages ~/.dotnet -name "*.so" -exec cp -v {} android/libs/release/arm64-v8a/ \; 2>/dev/null || true
-          find "$ANDROID_NDK_ROOT" -name "libc++_shared.so" -path "*aarch64*" -exec cp -v {} android/libs/release/arm64-v8a/ \; 2>/dev/null || true
-          find . -maxdepth 4 -name "*.so" -not -path "./android/build/*" -not -path "./.git/*" -exec cp -v {} android/libs/release/arm64-v8a/ \; 2>/dev/null || true
+          # Copy Mono runtime native shared libraries (.so)
+          find /tmp/mono-runtime/extracted/runtimes/android-arm64/native -name "*.so" -exec cp -v {} android/libs/release/arm64-v8a/ \;
 
-          # Mirror all native libraries across AGP source sets
-          cp -v android/libs/release/arm64-v8a/*.so android/src/main/jniLibs/arm64-v8a/ 2>/dev/null || true
-          cp -v android/libs/release/arm64-v8a/*.so android/src/mono/jniLibs/arm64-v8a/ 2>/dev/null || true
+          # Copy BCL assemblies (.dll)
+          if [ -d "/tmp/mono-runtime/extracted/runtimes/android-arm64/lib/net9.0" ]; then
+            cp -v /tmp/mono-runtime/extracted/runtimes/android-arm64/lib/net9.0/*.dll android/assets/dotnet_bcl/
+          fi
 
-          # Inject native libraries into base template AAR
-          TMPAAR=$(mktemp -d)
-          mkdir -p "$TMPAAR/jni/arm64-v8a"
-          cp android/libs/release/arm64-v8a/*.so "$TMPAAR/jni/arm64-v8a/"
-          (cd "$TMPAAR" && zip -u "$GITHUB_WORKSPACE/android/libs/release/godot-lib.template_release.aar" jni/arm64-v8a/*.so)
-          rm -rf "$TMPAAR"
+      - name: Compile Native Bridges (FMOD & MonoMod)
+        run: |
+          export ANDROID_NDK_ROOT="$ANDROID_SDK_ROOT/ndk/28.1.13356709"
+          CLANG="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android35-clang"
 
-          # 2. Sweep and copy ALL .dll BCL assemblies into android/assets/dotnet_bcl
-          find ~/.nuget/packages ~/.dotnet -name "*.dll" -exec cp -v {} android/assets/dotnet_bcl/ \; 2>/dev/null || true
-          find upstream -name "*.dll" -exec cp -v {} android/assets/dotnet_bcl/ \; 2>/dev/null || true
-          find src/STS2Mobile/bin -name "*.dll" -exec cp -v {} android/assets/dotnet_bcl/ \; 2>/dev/null || true
+          mkdir -p android/libs/release/arm64-v8a
 
-          echo "=== PACKAGED NATIVE LIBRARIES (.so) ==="
-          ls -la android/libs/release/arm64-v8a/
-          echo "=== PACKAGED BCL ASSEMBLIES (.dll) ==="
-          ls -la android/assets/dotnet_bcl/
+          if [ -f "android/native/sts2fmodbridge/sts2fmodbridge.c" ]; then
+            echo "Compiling sts2fmodbridge..."
+            $CLANG -shared -fPIC -O2 android/native/sts2fmodbridge/sts2fmodbridge.c -o android/libs/release/arm64-v8a/libsts2fmodbridge.so
+          fi
+
+          if [ -f "native/monomodshim/monomodshim.c" ]; then
+            echo "Compiling monomodshim..."
+            $CLANG -shared -fPIC -O2 native/monomodshim/monomodshim.c -o android/libs/release/arm64-v8a/libmonomodshim.so
+          fi
+
+      - name: Build STS2Mobile & Stage Managed Dependencies
+        run: |
+          mkdir -p android/assets/dotnet_bcl
+
+          # 1. Publish STS2Mobile managed project
+          dotnet publish src/STS2Mobile/STS2Mobile.csproj -c Release
+          PUBLISH_DIR="src/STS2Mobile/bin/Release/net9.0/publish"
+
+          cp -v "$PUBLISH_DIR"/STS2Mobile.dll \
+                "$PUBLISH_DIR"/SteamKit2.dll \
+                "$PUBLISH_DIR"/protobuf-net.dll \
+                "$PUBLISH_DIR"/protobuf-net.Core.dll \
+                "$PUBLISH_DIR"/System.IO.Hashing.dll \
+                "$PUBLISH_DIR"/ZstdSharp.dll \
+                android/assets/dotnet_bcl/
+
+          # 2. Copy upstream game assemblies
+          UPSTREAM_DIR="upstream/godot-export/.godot/mono/publish/arm64"
+          cp -v "$UPSTREAM_DIR"/0Harmony.dll \
+                "$UPSTREAM_DIR"/GodotSharp.dll \
+                "$UPSTREAM_DIR"/sts2.dll \
+                "$UPSTREAM_DIR"/Steamworks.NET.dll \
+                android/assets/dotnet_bcl/
+
+          # Ensure Sentry is excluded (crashes native threads on Android)
+          rm -f android/assets/dotnet_bcl/Sentry.dll
+
+          # 3. Apply IL patches for Android
+          dotnet build tools/SteamKitAndroidPatch/SteamKitAndroidPatch.csproj -c Release
+          dotnet tools/SteamKitAndroidPatch/bin/Release/net9.0/SteamKitAndroidPatch.dll \
+            android/assets/dotnet_bcl/SteamKit2.dll \
+            android/assets/dotnet_bcl/STS2Mobile.dll \
+            android/assets/dotnet_bcl/sts2.dll
 
       - name: Generate Bootstrap PCK
         run: |
@@ -154,12 +161,9 @@ jobs:
       - name: Build APK
         run: |
           sed -i 's/signingConfig signingConfigs.release/signingConfig signingConfigs.debug/g' android/build.gradle
-          ./scripts/build.sh --no-bump
-
-          # Re-sync native libs and BCL after build.sh execution to ensure gradle packs everything
-          cp -v android/libs/release/arm64-v8a/*.so android/src/main/jniLibs/arm64-v8a/ 2>/dev/null || true
-          cp -v android/libs/release/arm64-v8a/*.so android/src/mono/jniLibs/arm64-v8a/ 2>/dev/null || true
-          find ~/.nuget/packages ~/.dotnet -name "*.dll" -exec cp {} android/assets/dotnet_bcl/ \; 2>/dev/null || true
+          cd android
+          chmod +x gradlew
+          ./gradlew assembleMonoRelease
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4

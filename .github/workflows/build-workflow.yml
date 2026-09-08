@@ -52,10 +52,9 @@ jobs:
           path: |
             android/libs/release
             vendor/godot/platform/android/java/lib/libs
-          key: godot-cpp-v3-${{ hashFiles('scripts/build-godot.sh', 'scripts/setup-godot-source.sh', 'patches/godot/*') }}
+          key: godot-cpp-v4-${{ hashFiles('scripts/build-godot.sh', 'scripts/setup-godot-source.sh', 'patches/godot/*') }}
           restore-keys: |
-            godot-cpp-v3-
-            godot-cpp-v2-
+            godot-cpp-v4-
 
       - name: Compile Godot Engine Native Binaries
         env:
@@ -64,11 +63,13 @@ jobs:
           export ANDROID_HOME="$ANDROID_SDK_ROOT"
           export ANDROID_NDK_ROOT="$ANDROID_SDK_ROOT/ndk/28.1.13356709"
 
+          mkdir -p android/libs/release/arm64-v8a
+
           if [ ! -f "android/libs/release/godot-lib.template_release.aar" ]; then
             cd vendor/godot/platform/android/java
+            chmod +x gradlew
             ./gradlew assembleTemplateRelease
             cd "$GITHUB_WORKSPACE"
-            mkdir -p android/libs/release/arm64-v8a
             find vendor/godot/platform/android/java -name "*.aar" -exec cp {} android/libs/release/godot-lib.template_release.aar \;
           fi
 
@@ -81,24 +82,41 @@ jobs:
 
       - name: Download and Stage Android Mono Runtime & BCL
         run: |
-          DOTNET_VERSION="9.0.0"
-          PACKAGE="microsoft.netcore.app.runtime.mono.android-arm64"
-          URL="https://api.nuget.org/v3-flatcontainer/${PACKAGE}/${DOTNET_VERSION}/${PACKAGE}.${DOTNET_VERSION}.nupkg"
-
-          mkdir -p /tmp/mono-runtime
-          echo "Downloading $PACKAGE $DOTNET_VERSION..."
-          curl -fsSL -o /tmp/mono-runtime/runtime.zip "$URL"
-          unzip -q /tmp/mono-runtime/runtime.zip -d /tmp/mono-runtime/extracted
-
           mkdir -p android/libs/release/arm64-v8a
           mkdir -p android/assets/dotnet_bcl
 
-          # Copy Mono runtime native shared libraries (.so)
-          find /tmp/mono-runtime/extracted/runtimes/android-arm64/native -name "*.so" -exec cp -v {} android/libs/release/arm64-v8a/ \;
+          # 1. Resolve .NET 9 runtime version from installed SDK
+          RUNTIME_DIR=$(ls -d /usr/share/dotnet/shared/Microsoft.NETCore.App/9.* 2>/dev/null | sort -V | tail -1 || true)
+          RUNTIME_VERSION="9.0.0"
+          if [ -n "$RUNTIME_DIR" ] && [ -d "$RUNTIME_DIR" ]; then
+            RUNTIME_VERSION=$(basename "$RUNTIME_DIR")
+          fi
+          echo "Using .NET runtime version: $RUNTIME_VERSION"
 
-          # Copy BCL assemblies (.dll)
-          if [ -d "/tmp/mono-runtime/extracted/runtimes/android-arm64/lib/net9.0" ]; then
-            cp -v /tmp/mono-runtime/extracted/runtimes/android-arm64/lib/net9.0/*.dll android/assets/dotnet_bcl/
+          PACKAGE="microsoft.netcore.app.runtime.mono.android-arm64"
+          URL="https://api.nuget.org/v3-flatcontainer/${PACKAGE}/${RUNTIME_VERSION}/${PACKAGE}.${RUNTIME_VERSION}.nupkg"
+          FALLBACK_URL="https://api.nuget.org/v3-flatcontainer/${PACKAGE}/9.0.0/${PACKAGE}.9.0.0.nupkg"
+
+          mkdir -p /tmp/mono-runtime
+          echo "Downloading $PACKAGE..."
+          curl -fsSL -o /tmp/mono-runtime/runtime.zip "$URL" || curl -fsSL -o /tmp/mono-runtime/runtime.zip "$FALLBACK_URL"
+          unzip -q -o /tmp/mono-runtime/runtime.zip -d /tmp/mono-runtime/extracted
+
+          # 2. Stage Mono native shared libraries (.so)
+          echo "Staging Mono runtime native shared libraries..."
+          find /tmp/mono-runtime/extracted -name "*.so" -exec cp -v {} android/libs/release/arm64-v8a/ \;
+
+          # 3. Stage BCL assemblies (.dll) into android/assets/dotnet_bcl
+          echo "Staging BCL assemblies..."
+          if [ -d "$RUNTIME_DIR" ]; then
+            cp -v "$RUNTIME_DIR"/*.dll android/assets/dotnet_bcl/ 2>/dev/null || true
+          fi
+          find /tmp/mono-runtime/extracted -name "*.dll" -exec cp -v {} android/assets/dotnet_bcl/ \;
+
+          # Copy NDK libc++_shared.so if present
+          NDK_LIBCPP=$(find "$ANDROID_SDK_ROOT/ndk/28.1.13356709" -name "libc++_shared.so" -path "*aarch64*" | head -1 || true)
+          if [ -n "$NDK_LIBCPP" ] && [ -f "$NDK_LIBCPP" ]; then
+            cp -v "$NDK_LIBCPP" android/libs/release/arm64-v8a/
           fi
 
       - name: Compile Native Bridges (FMOD & MonoMod)
@@ -122,7 +140,7 @@ jobs:
         run: |
           mkdir -p android/assets/dotnet_bcl
 
-          # 1. Publish STS2Mobile managed project
+          # 1. Publish STS2Mobile
           dotnet publish src/STS2Mobile/STS2Mobile.csproj -c Release
           PUBLISH_DIR="src/STS2Mobile/bin/Release/net9.0/publish"
 
@@ -134,7 +152,7 @@ jobs:
                 "$PUBLISH_DIR"/ZstdSharp.dll \
                 android/assets/dotnet_bcl/
 
-          # 2. Copy upstream game assemblies
+          # 2. Stage upstream game assemblies
           UPSTREAM_DIR="upstream/godot-export/.godot/mono/publish/arm64"
           cp -v "$UPSTREAM_DIR"/0Harmony.dll \
                 "$UPSTREAM_DIR"/GodotSharp.dll \
@@ -142,19 +160,21 @@ jobs:
                 "$UPSTREAM_DIR"/Steamworks.NET.dll \
                 android/assets/dotnet_bcl/
 
-          # Ensure Sentry is excluded (crashes native threads on Android)
+          # Remove Sentry.dll (crashes native threads under Android bionic)
           rm -f android/assets/dotnet_bcl/Sentry.dll
 
-          # 3. Apply IL patches for Android
+          # 3. Patch managed assemblies for Android
           dotnet build tools/SteamKitAndroidPatch/SteamKitAndroidPatch.csproj -c Release
           dotnet tools/SteamKitAndroidPatch/bin/Release/net9.0/SteamKitAndroidPatch.dll \
             android/assets/dotnet_bcl/SteamKit2.dll \
             android/assets/dotnet_bcl/STS2Mobile.dll \
             android/assets/dotnet_bcl/sts2.dll
 
-      - name: Generate Bootstrap PCK
+      - name: Generate & Verify Bootstrap PCK
         run: |
-          if [ -f "scripts/make-bootstrap-pck.py" ]; then
+          if [ -f "scripts/verify-bootstrap-pck.py" ]; then
+            python3 scripts/verify-bootstrap-pck.py
+          elif [ -f "scripts/make-bootstrap-pck.py" ]; then
             python3 scripts/make-bootstrap-pck.py
           fi
 
@@ -163,7 +183,7 @@ jobs:
           sed -i 's/signingConfig signingConfigs.release/signingConfig signingConfigs.debug/g' android/build.gradle
           cd android
           chmod +x gradlew
-          ./gradlew assembleMonoRelease
+          ./gradlew assembleMonoRelease -Pexport_enabled_abis=arm64-v8a
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4

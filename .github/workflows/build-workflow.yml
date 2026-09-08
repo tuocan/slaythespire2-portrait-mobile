@@ -102,7 +102,7 @@ jobs:
           curl -fsSL -o /tmp/mono-runtime/runtime.zip "$URL" || curl -fsSL -o /tmp/mono-runtime/runtime.zip "$FALLBACK_URL"
           unzip -q -o /tmp/mono-runtime/runtime.zip -d /tmp/mono-runtime/extracted
 
-          # 2. Stage Mono native shared libraries (.so)
+          # 2. Stage Mono runtime native shared libraries (.so)
           echo "Staging Mono runtime native shared libraries..."
           find /tmp/mono-runtime/extracted -name "*.so" -exec cp -v {} android/libs/release/arm64-v8a/ \;
 
@@ -152,16 +152,14 @@ jobs:
                 "$PUBLISH_DIR"/ZstdSharp.dll \
                 android/assets/dotnet_bcl/
 
-          # 2. Stage upstream game assemblies
+          # 2. Stage upstream game assemblies (keep Sentry.dll for Cecil resolution during patching)
           UPSTREAM_DIR="upstream/godot-export/.godot/mono/publish/arm64"
           cp -v "$UPSTREAM_DIR"/0Harmony.dll \
                 "$UPSTREAM_DIR"/GodotSharp.dll \
                 "$UPSTREAM_DIR"/sts2.dll \
                 "$UPSTREAM_DIR"/Steamworks.NET.dll \
+                "$UPSTREAM_DIR"/Sentry.dll \
                 android/assets/dotnet_bcl/
-
-          # Remove Sentry.dll (crashes native threads under Android bionic)
-          rm -f android/assets/dotnet_bcl/Sentry.dll
 
           # 3. Patch managed assemblies for Android
           dotnet build tools/SteamKitAndroidPatch/SteamKitAndroidPatch.csproj -c Release
@@ -169,6 +167,9 @@ jobs:
             android/assets/dotnet_bcl/SteamKit2.dll \
             android/assets/dotnet_bcl/STS2Mobile.dll \
             android/assets/dotnet_bcl/sts2.dll
+
+          # 4. Remove Sentry.dll after patching so it is NOT packaged into the APK
+          rm -f android/assets/dotnet_bcl/Sentry.dll
 
       - name: Generate & Verify Bootstrap PCK
         run: |
@@ -183,7 +184,7 @@ jobs:
           sed -i 's/signingConfig signingConfigs.release/signingConfig signingConfigs.debug/g' android/build.gradle
           cd android
           chmod +x gradlew
-          ./gradlew assembleMonoRelease -Pexport_enabled_abis=arm64-v8a
+          ./gradlew assembleMonoRelease -Pperform_signing=true -Pexport_enabled_abis=arm64-v8a
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4

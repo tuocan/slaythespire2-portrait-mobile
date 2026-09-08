@@ -80,6 +80,42 @@ jobs:
             echo "Godot native libraries present in cache. Skipping rebuild."
           fi
 
+      - name: Cache Spine GDExtension
+        uses: actions/cache@v4
+        id: spine-cache
+        with:
+          path: android/libs/release/arm64-v8a/libspine_godot.android.template_release.arm64.so
+          key: spine-android-v1-4.2
+
+      - name: Build Spine GDExtension for Android (Spine 4.2)
+        if: steps.spine-cache.outputs.cache-hit != 'true'
+        run: |
+          export ANDROID_HOME="$ANDROID_SDK_ROOT"
+          export ANDROID_NDK_ROOT="$ANDROID_SDK_ROOT/ndk/28.1.13356709"
+          SPINE_DIR="/tmp/spine-android-build"
+          mkdir -p "$SPINE_DIR"
+
+          echo "Cloning spine-runtimes (branch 4.2)..."
+          git clone --depth 1 --branch 4.2 https://github.com/EsotericSoftware/spine-runtimes.git "$SPINE_DIR/spine-runtimes"
+
+          cd "$SPINE_DIR/spine-runtimes/spine-godot"
+
+          echo "Cloning godot-cpp..."
+          if git ls-remote --exit-code --heads https://github.com/godotengine/godot-cpp.git 4.5 >/dev/null 2>&1; then
+            git clone --depth 1 --branch 4.5 https://github.com/godotengine/godot-cpp.git godot-cpp
+          else
+            git clone --depth 1 --branch master https://github.com/godotengine/godot-cpp.git godot-cpp
+          fi
+
+          echo "Setting up spine-cpp sources..."
+          cp -r "$SPINE_DIR/spine-runtimes/spine-cpp/spine-cpp" spine_godot/
+
+          echo "Compiling Spine GDExtension for Android arm64..."
+          scons platform=android arch=arm64 target=template_release ndk_version=28.1.13356709 -j$(nproc)
+
+          mkdir -p "$GITHUB_WORKSPACE/android/libs/release/arm64-v8a"
+          find bin -name "*.so" -exec cp -v {} "$GITHUB_WORKSPACE/android/libs/release/arm64-v8a/" \;
+
       - name: Download and Stage Android Mono Runtime & BCL
         run: |
           mkdir -p android/libs/release/arm64-v8a

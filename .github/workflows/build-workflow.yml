@@ -152,7 +152,7 @@ jobs:
                 "$PUBLISH_DIR"/ZstdSharp.dll \
                 android/assets/dotnet_bcl/
 
-          # 2. Stage upstream game assemblies (keep Sentry.dll for Cecil resolution during patching)
+          # 2. Stage upstream game assemblies (including Sentry.dll)
           UPSTREAM_DIR="upstream/godot-export/.godot/mono/publish/arm64"
           cp -v "$UPSTREAM_DIR"/0Harmony.dll \
                 "$UPSTREAM_DIR"/GodotSharp.dll \
@@ -167,9 +167,6 @@ jobs:
             android/assets/dotnet_bcl/SteamKit2.dll \
             android/assets/dotnet_bcl/STS2Mobile.dll \
             android/assets/dotnet_bcl/sts2.dll
-
-          # 4. Remove Sentry.dll after patching so it is NOT packaged into the APK
-          rm -f android/assets/dotnet_bcl/Sentry.dll
 
       - name: Generate & Verify Bootstrap PCK
         run: |

@@ -78,6 +78,17 @@ internal static class PortraitPatches
 
     internal static void Apply(Harmony harmony)
     {
+        // Landscape plays the game's own layout: keep only the touch pointer
+        // bridge (tap/hover repair is orientation-agnostic) and skip the
+        // portrait viewport and every layout patch class.
+        if (OrientationPreference.LandscapeGameActive)
+        {
+            PortraitTouchInput.Install();
+            STS2Mobile.Landscape.LandscapeLayout.InstallPatches(harmony);
+            PatchHelper.Log("[Portrait] Landscape mode: portrait layout patches skipped");
+            return;
+        }
+
         PortraitDisplay.Apply();
         PortraitTouchInput.Install();
 

@@ -402,6 +402,10 @@ internal static class PortraitDisplay
 
     internal static bool Apply()
     {
+        // Landscape game boots keep the game's own window and orientation.
+        if (OrientationPreference.LandscapeGameActive)
+            return false;
+
         if (Engine.GetMainLoop() is not SceneTree tree)
             return false;
 

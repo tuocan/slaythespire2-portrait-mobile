@@ -640,6 +640,8 @@ public static class ModEntry
                 return;
             }
 
+            OrientationPreference.ResolveForGameBoot();
+
             var harmony = new Harmony(HarmonyId);
             BootstrapTrace.Log("Starting startup patch orchestration");
             var patchResult = StartupPatchOrchestrator.Apply(harmony);

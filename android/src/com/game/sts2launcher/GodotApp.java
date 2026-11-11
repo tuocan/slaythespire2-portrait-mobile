@@ -110,6 +110,8 @@ public class GodotApp extends GodotActivity {
 	private boolean fmodAndroidInitialized;
 	private static final String GRAPHICS_DEVICE_FILE = "graphics_device.txt";
 	private static final String RENDERER_MODE_FILE = "renderer_mode";
+	private static final String ORIENTATION_MODE_FILE = "orientation_mode";
+	private volatile boolean landscapeGame = false;
 	private static final String LAST_RENDERER_ATTEMPT_FILE = "last_renderer_attempt.txt";
 
 	@Override
@@ -179,11 +181,25 @@ public class GodotApp extends GodotActivity {
 	// Coerce every non-portrait request at the OS boundary instead of racing it.
 	@Override
 	public void setRequestedOrientation(int requestedOrientation) {
-		int coerced = coercePortraitOrientation(requestedOrientation);
+		int coerced = landscapeGame
+			? ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+			: coercePortraitOrientation(requestedOrientation);
 		if (coerced != requestedOrientation) {
-			Log.i(TAG, "Coerced requested orientation " + requestedOrientation + " to sensor portrait");
+			Log.i(TAG, "Coerced requested orientation " + requestedOrientation + " to "
+				+ (landscapeGame ? "sensor landscape" : "sensor portrait"));
 		}
 		super.setRequestedOrientation(coerced);
+	}
+
+	// The launcher always runs portrait. A game boot follows the player's
+	// "Game orientation" choice, saved by the launcher (OrientationPreference.cs)
+	// in files/orientation_mode; landscape keeps the game's own layout.
+	private void applyGameOrientationPreference() {
+		landscapeGame = "landscape".equalsIgnoreCase(readInternalTextFile(ORIENTATION_MODE_FILE).trim());
+		Log.i(TAG, "Game orientation preference: " + (landscapeGame ? "landscape" : "portrait"));
+		if (landscapeGame) {
+			runOnUiThread(() -> super.setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE));
+		}
 	}
 
 	private static int coercePortraitOrientation(int requestedOrientation) {
@@ -859,6 +875,7 @@ public class GodotApp extends GodotActivity {
 			Log.w(TAG, "Consumed a game launch request but the PCK is not ready; starting the launcher instead");
 		}
 		if (pckReady && launchRequested) {
+			applyGameOrientationPreference();
 			patchGamePckForAndroid(pckFile);
 			// Ported from upstream: renderer choice is a per-device policy
 			// (saved preference + GPU evidence + safe launch) instead of a

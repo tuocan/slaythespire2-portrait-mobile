@@ -1,5 +1,6 @@
 using Mono.Cecil;
 using Mono.Cecil.Cil;
+using Mono.Cecil.Rocks;
 
 if (args.Length < 2 || args.Length > 3)
 {
@@ -26,11 +27,11 @@ AssertRequiredCryptoPatches(cryptoPatchCounts);
 AssertNoForbiddenCryptoCallsites(steamKit);
 
 WriteModuleOverOriginal(steamKit, steamKitPath);
-helper.Dispose();
 Console.WriteLine(FormatCryptoPatchSummary(cryptoPatchCounts));
 
 if (!string.IsNullOrWhiteSpace(gamePath))
-    PatchGamePlatformUtil(gamePath, resolver);
+    PatchGamePlatformUtil(gamePath, resolver, helper);
+helper.Dispose();
 
 static DefaultAssemblyResolver CreateResolver(params string?[] assemblyPaths)
 {
@@ -42,6 +43,13 @@ static DefaultAssemblyResolver CreateResolver(params string?[] assemblyPaths)
 
         resolver.AddSearchDirectory(Path.GetDirectoryName(Path.GetFullPath(assemblyPath))!);
     }
+
+    // Reference-only directory (the game's own managed assemblies). Rewriting sts2.dll
+    // needs Sentry.dll to resolve constant types, but Sentry.dll is deliberately not
+    // shipped in dotnet_bcl, so it is resolved from here without being packaged.
+    var referenceDir = Environment.GetEnvironmentVariable("STS2_PATCH_REFERENCE_DIR");
+    if (!string.IsNullOrWhiteSpace(referenceDir) && Directory.Exists(referenceDir))
+        resolver.AddSearchDirectory(Path.GetFullPath(referenceDir));
 
     return resolver;
 }
@@ -362,7 +370,103 @@ static bool IsForbiddenCryptoCallsite(MethodReference mr)
     return false;
 }
 
-static void PatchGamePlatformUtil(string gamePath, IAssemblyResolver resolver)
+// Game v0.111 changed ModelDb.Init to Init(Type[] injectedModelTypes). Building a
+// Harmony replacement for that method aborts Mono on Android natively
+// ("mono_class_from_mono_type_internal: implement me 0x00", class.c:2324), so the
+// two-phase registry init is wired in here instead:
+//   ModelDb.Init:     if (STS2Mobile.Patches.ModelDbHooks.Init(arg)) return; <original>
+//   ModelDb.Contains: if (__sts2mobile_SuppressContains) return false; <original>
+// STS2Mobile detects the added field and skips its runtime Harmony patch.
+static void PatchModelDbInit(ModuleDefinition game, ModuleDefinition helper)
+{
+    var modelDb = game.GetType("MegaCrit.Sts2.Core.Models.ModelDb");
+    var init = modelDb?.Methods.FirstOrDefault(m =>
+        m.Name == "Init" && m.IsStatic && m.HasBody &&
+        m.Parameters.Count == 1 && m.Parameters[0].ParameterType.FullName == "System.Type[]");
+    if (modelDb == null || init == null)
+    {
+        Console.WriteLine("sts2.dll has no ModelDb.Init(Type[]); ModelDb stays on the runtime Harmony patch");
+        return;
+    }
+
+    var hookType = helper.GetType("STS2Mobile.Patches.ModelDbHooks")
+        ?? throw new InvalidOperationException("Could not find STS2Mobile.Patches.ModelDbHooks");
+    if (!hookType.IsPublic)
+        throw new InvalidOperationException("ModelDbHooks must be public because sts2.dll calls it across an assembly boundary");
+    var hookInit = hookType.Methods.FirstOrDefault(m =>
+        m.Name == "Init" && m.IsStatic && m.IsPublic && m.ReturnType.FullName == "System.Boolean" &&
+        m.Parameters.Count == 1 && m.Parameters[0].ParameterType.FullName == "System.Type[]")
+        ?? throw new InvalidOperationException("Could not find public static bool ModelDbHooks.Init(Type[])");
+    var hookInitRef = game.ImportReference(hookInit);
+
+    const string flagName = "__sts2mobile_SuppressContains";
+    if (modelDb.Fields.Any(f => f.Name == flagName))
+        throw new InvalidOperationException("sts2.dll is already patched (ModelDb flag present); patch a fresh copy");
+    var flag = new FieldDefinition(flagName, FieldAttributes.Public | FieldAttributes.Static, game.TypeSystem.Boolean);
+    modelDb.Fields.Add(flag);
+
+    PrependGuard(init, (il, original) => new[]
+    {
+        il.Create(OpCodes.Ldarg_0),
+        il.Create(OpCodes.Call, hookInitRef),
+        il.Create(OpCodes.Brfalse, original),
+        il.Create(OpCodes.Ret),
+    });
+
+    var contains = modelDb.Methods.FirstOrDefault(m =>
+        m.Name == "Contains" && m.IsStatic && m.HasBody && m.ReturnType.FullName == "System.Boolean" &&
+        m.Parameters.Count == 1 && m.Parameters[0].ParameterType.FullName == "System.Type");
+    if (contains != null)
+    {
+        PrependGuard(contains, (il, original) => new[]
+        {
+            il.Create(OpCodes.Ldsfld, flag),
+            il.Create(OpCodes.Brfalse, original),
+            il.Create(OpCodes.Ldc_I4_0),
+            il.Create(OpCodes.Ret),
+        });
+    }
+
+    // v0.111's AbstractModel constructor no longer asks ModelDb.Contains; it throws
+    // DuplicateModelException when ModelDb.GetByIdOrNull<AbstractModel>(id) finds an
+    // entry. Phase 1 pre-registers every model, so Phase 2 must see "no entry" there:
+    //   var existing = GetByIdOrNull<...>(id); if (flag) existing = null;
+    var abstractModel = game.GetType("MegaCrit.Sts2.Core.Models.AbstractModel");
+    var modelCtor = abstractModel?.Methods.FirstOrDefault(m => m.IsConstructor && !m.IsStatic && m.Parameters.Count == 0 && m.HasBody);
+    var duplicateLookup = modelCtor?.Body.Instructions.FirstOrDefault(i =>
+        i.OpCode == OpCodes.Call &&
+        i.Operand is GenericInstanceMethod g &&
+        g.ElementMethod.Name == "GetByIdOrNull" &&
+        g.ElementMethod.DeclaringType.FullName == modelDb.FullName);
+    if (modelCtor != null && duplicateLookup != null)
+    {
+        modelCtor.Body.SimplifyMacros();
+        var il = modelCtor.Body.GetILProcessor();
+        var next = duplicateLookup.Next;
+        il.InsertBefore(next, il.Create(OpCodes.Ldsfld, flag));
+        il.InsertBefore(next, il.Create(OpCodes.Brfalse, next));
+        il.InsertBefore(next, il.Create(OpCodes.Pop));
+        il.InsertBefore(next, il.Create(OpCodes.Ldnull));
+        modelCtor.Body.OptimizeMacros();
+    }
+
+    Console.WriteLine(
+        $"Patched sts2.dll ModelDb.Init(Type[]): build-time two-phase hook; Contains guard={(contains != null)}; " +
+        $"AbstractModel duplicate-check guard={(duplicateLookup != null)}");
+}
+
+static void PrependGuard(MethodDefinition method, Func<ILProcessor, Instruction, Instruction[]> guard)
+{
+    method.Body.SimplifyMacros();
+    var il = method.Body.GetILProcessor();
+    var original = method.Body.Instructions[0];
+    foreach (var instruction in guard(il, original))
+        il.InsertBefore(original, instruction);
+    method.Body.MaxStackSize = Math.Max(method.Body.MaxStackSize, 2);
+    method.Body.OptimizeMacros();
+}
+
+static void PatchGamePlatformUtil(string gamePath, IAssemblyResolver resolver, ModuleDefinition helper)
 {
     var reader = new ReaderParameters { AssemblyResolver = resolver, ReadWrite = false };
     var game = ModuleDefinition.ReadModule(gamePath, reader);
@@ -415,6 +519,28 @@ static void PatchGamePlatformUtil(string gamePath, IAssemblyResolver resolver)
         il.Append(il.Create(OpCodes.Ldsfld, nullField));
         il.Append(il.Create(OpCodes.Ret));
     });
+
+    // Newer game builds (v0.111+) ship a module initializer (<Module>..cctor) that calls
+    // SentryAutoInit.Init -> Sentry.Godot.Internal.SentryGodotInitializer.AutoInit.
+    // Sentry.Godot.dll is not packaged for Android, so the module initializer throws and
+    // Mono reports a TypeInitializationException while creating the GodotPlugins delegate
+    // (gray screen, ".NET: Failed to get GodotPlugins initialization function pointer").
+    // Sentry is disabled on Android anyway, so make the auto-init a no-op.
+    var sentryAutoInit = game.Types
+        .SelectMany(WalkTypes)
+        .FirstOrDefault(t => t.Name == "SentryAutoInit");
+    var sentryInit = sentryAutoInit?.Methods.FirstOrDefault(m => m.Name == "Init" && m.IsStatic && m.Parameters.Count == 0);
+    if (sentryInit != null)
+    {
+        ReplaceBody(sentryInit, il => il.Append(il.Create(OpCodes.Ret)));
+        Console.WriteLine("Patched sts2.dll SentryAutoInit.Init: no-op (module initializer no longer touches Sentry.Godot)");
+    }
+    else
+    {
+        Console.WriteLine("sts2.dll has no SentryAutoInit.Init; module initializer patch not needed");
+    }
+
+    PatchModelDbInit(game, helper);
 
     WriteModuleOverOriginal(game, gamePath);
     Console.WriteLine("Patched sts2.dll PlatformUtil: NullPlatformUtilStrategy constructor no-op, static constructor uses NullPlatformUtilStrategy, PrimaryPlatform=None, GetPlatformUtil returns _null");

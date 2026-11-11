@@ -627,6 +627,19 @@ public static class ModEntry
         try
         {
             ConfigureWritableTempDirectory();
+
+            // The bootstrap PCK only hosts the standalone launcher. The game's own
+            // dependency assemblies (SmartFormat, Sentry, ...) are not staged in this
+            // mode, and patching game types without them can hit a fatal Mono
+            // assertion (class.c "should not be reached") instead of a catchable
+            // exception. Game patches are applied after PLAY restarts with the game PCK.
+            if (IsBootstrapPackLoaded())
+            {
+                PatchHelper.Log("Launcher bootstrap mode; skipping game startup patch orchestration.");
+                ScheduleStandaloneLauncher();
+                return;
+            }
+
             var harmony = new Harmony(HarmonyId);
             BootstrapTrace.Log("Starting startup patch orchestration");
             var patchResult = StartupPatchOrchestrator.Apply(harmony);

@@ -666,7 +666,10 @@ public class GodotApp extends GodotActivity {
 			|| lower.equals("msquic.dll")
 			|| lower.equals("steam_api64.dll")
 			|| lower.equals("steamworks.net.dll")
-			|| lower.equals("sentry.dll")
+			// sentry.dll is copied on purpose: game v0.111+ references Sentry types
+			// from core paths (LocManager -> SentryService), so without it startup
+			// dies with TypeLoadException. SentryService.Initialize/AfterGameInit
+			// stay patched out, so the SDK and its native side never start.
 			|| lower.equals("sharpgen.runtime.dll")
 			|| lower.equals("sharpgen.runtime.com.dll")
 			|| lower.equals("system.io.compression.native.dll")

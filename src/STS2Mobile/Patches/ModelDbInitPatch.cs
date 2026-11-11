@@ -21,8 +21,23 @@ internal static class ModelDbInitPatch
 
     private static bool _suppressContains = false;
 
+    // Set by tools/SteamKitAndroidPatch when it rewrites sts2.dll at build time:
+    // ModelDb.Init(Type[]) then calls ModelDbHooks.Init first and ModelDb.Contains
+    // reads this static flag, so neither method needs a runtime Harmony patch.
+    internal const string BuildTimeSuppressContainsField = "__sts2mobile_SuppressContains";
+
     internal static void Apply(Harmony harmony)
     {
+        // Game v0.111 changed Init to Init(Type[] injectedModelTypes) with a
+        // null-coalescing prologue; building Harmony's replacement for it aborts
+        // Mono on Android natively ("implement me 0x00", class.c:2324). When the
+        // build-time hook is present, skip Harmony for this method entirely.
+        if (GetBuildTimeSuppressContainsField() != null)
+        {
+            PatchHelper.Log("ModelDb.Init hooked at build time; runtime Harmony patch skipped");
+            return;
+        }
+
         PatchHelper.Patch(
             harmony,
             typeof(ModelDb),
@@ -41,7 +56,18 @@ internal static class ModelDbInitPatch
         return true;
     }
 
+    private static FieldInfo GetBuildTimeSuppressContainsField()
+        => typeof(ModelDb).GetField(
+            BuildTimeSuppressContainsField,
+            BindingFlags.Public | BindingFlags.Static
+        );
+
     private static bool InitPrefix()
+        => !RunTwoPhaseInit();
+
+    // Returns true when the registry was populated here and the original
+    // ModelDb.Init body must be skipped; false falls back to the original.
+    internal static bool RunTwoPhaseInit()
     {
         PatchHelper.Log("Running patched ModelDb.Init()");
 
@@ -53,7 +79,7 @@ internal static class ModelDbInitPatch
                 out var containsMethod
             ))
         {
-            return true;
+            return false;
         }
 
         // Phase 1: Pre-populate dictionary with uninitialized objects
@@ -83,22 +109,30 @@ internal static class ModelDbInitPatch
 
         // Temporarily suppress Contains() during Phase 2 so constructors don't
         // short-circuit when they check if their type is already registered.
-        var harmony = new Harmony(HarmonyId);
-        var containsPrefix = typeof(ModelDbInitPatch).GetMethod(
-            nameof(ContainsPrefix),
-            BindingFlags.NonPublic | BindingFlags.Static
-        );
-        if (containsPrefix == null)
+        // Prefer the build-time flag; fall back to a runtime Harmony prefix.
+        var buildTimeFlag = GetBuildTimeSuppressContainsField();
+        Harmony harmony = null;
+        MethodInfo containsPrefix = null;
+        if (buildTimeFlag == null)
         {
-            PatchHelper.Log("ModelDb.Init fallback: ContainsPrefix method missing");
-            return true;
+            harmony = new Harmony(HarmonyId);
+            containsPrefix = typeof(ModelDbInitPatch).GetMethod(
+                nameof(ContainsPrefix),
+                BindingFlags.NonPublic | BindingFlags.Static
+            );
+            if (containsPrefix == null)
+            {
+                PatchHelper.Log("ModelDb.Init fallback: ContainsPrefix method missing");
+                return false;
+            }
+            harmony.Patch(containsMethod, new HarmonyMethod(containsPrefix));
         }
-        harmony.Patch(containsMethod, new HarmonyMethod(containsPrefix));
 
         // Phase 2: Run constructors on pre-allocated objects
         PatchHelper.Log("Phase 2: Running constructors");
 
         _suppressContains = true;
+        buildTimeFlag?.SetValue(null, true);
 
         int successCount = 0;
         var failed = new List<Type>();
@@ -138,7 +172,8 @@ internal static class ModelDbInitPatch
         }
 
         _suppressContains = false;
-        harmony.Unpatch(containsMethod, containsPrefix);
+        buildTimeFlag?.SetValue(null, false);
+        harmony?.Unpatch(containsMethod, containsPrefix);
 
         if (failed.Count > 0)
         {
@@ -151,7 +186,7 @@ internal static class ModelDbInitPatch
             PatchHelper.Log($"All {successCount} model types registered successfully");
         }
 
-        return false;
+        return true;
     }
 
     private static bool TryLoadModelDbInitAccess(

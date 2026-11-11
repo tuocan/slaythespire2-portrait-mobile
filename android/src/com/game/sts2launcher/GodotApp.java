@@ -85,7 +85,9 @@ public class GodotApp extends GodotActivity {
 	private static final String KEY_LAUNCH_GAME_ON_NEXT_START = "launch_game_on_next_start";
 	private static final String KEY_SAFE_LAUNCH_ON_NEXT_START = "safe_launch_on_next_start";
 	private static final int ASSEMBLY_CACHE_SCHEMA = 9;
-	private static final String PCK_ANDROID_PATCH_MARKER = ".android_pck_patch_v26";
+	// v27: ARM64 keeps FMOD enabled. Bumped so PCKs patched by v26 (FMOD disabled)
+	// are revisited once and their FMOD entries restored.
+	private static final String PCK_ANDROID_PATCH_MARKER = ".android_pck_patch_v27";
 	private static final String LAST_ANDROID_EXCEPTION_FILE = "last_android_uncaught_exception.txt";
 	private static final long STREAM_HTTP_RESPONSE_THRESHOLD_BYTES = 256L * 1024L;
 	private static final int MAX_BUFFERED_HTTP_RESPONSE_BYTES = 1024 * 1024;
@@ -347,6 +349,27 @@ public class GodotApp extends GodotActivity {
 		}
 
 		return "arm64";
+	}
+
+	// findLibrary resolves both extracted libraries and ones stored in the APK.
+	private boolean hasAndroidFmodLibraries() {
+		if (isX86Runtime()) {
+			return false;
+		}
+		try {
+			ClassLoader loader = getClassLoader();
+			if (loader instanceof dalvik.system.BaseDexClassLoader) {
+				dalvik.system.BaseDexClassLoader dexLoader = (dalvik.system.BaseDexClassLoader) loader;
+				boolean present = dexLoader.findLibrary("fmod") != null
+					&& dexLoader.findLibrary("fmodstudio") != null
+					&& dexLoader.findLibrary("GodotFmod.android.template_release.arm64") != null;
+				Log.i(TAG, "FMOD Android libraries packaged: " + present);
+				return present;
+			}
+		} catch (Throwable t) {
+			Log.w(TAG, "Could not check for FMOD Android libraries", t);
+		}
+		return false;
 	}
 
 	private boolean isX86Runtime() {
@@ -921,7 +944,12 @@ public class GodotApp extends GodotActivity {
 	}
 
 	private void patchGamePckForAndroid(File pckFile) {
-		File marker = new File(gameDir, PCK_ANDROID_PATCH_MARKER);
+		// FMOD stays enabled only when the APK actually carries the FMOD Engine and
+		// GodotFmod libraries (they cannot be built from public sources, so many
+		// builds lack them). The marker records which variant was applied, so
+		// adding or removing those libraries re-patches the PCK.
+		boolean keepFmod = hasAndroidFmodLibraries();
+		File marker = new File(gameDir, PCK_ANDROID_PATCH_MARKER + (keepFmod ? "_fmod" : "_nofmod"));
 		if (marker.exists() && marker.lastModified() >= pckFile.lastModified()) {
 			return;
 		}
@@ -963,34 +991,41 @@ public class GodotApp extends GodotActivity {
 				readUInt32LE(raf); // entry flags
 
 				long absOffset = relativeOffsets ? fileBase + offset : offset;
+				// With the FMOD libraries packaged, FMOD stays enabled (same rule as the
+				// StS2-Launcher-Overhaul issue #37 fix): only Sentry is disabled, and FMOD
+				// entries a previous build commented out are restored. Without them the
+				// old behavior (FMOD disabled) applies.
 				if (isPckPath(path, "project.binary")) {
-					patched |= patchPckBinaryProjectEntry(raf, absOffset, size);
+					patched |= patchPckBinaryProjectEntry(raf, absOffset, size, keepFmod);
 				} else if (isPckPath(path, "project.godot")) {
-					patched |= patchPckTextEntry(raf, absOffset, size, new String[] {
-						"SentryInit=\"*res://addons/sentry/SentryInit.gd\"",
-						"FmodManager=\"*res://addons/fmod/FmodManager.gd\""
-					});
-				} else if (isPckPath(path, ".godot/extension_list.cfg")) {
-					if (isX86Runtime()) {
+					if (keepFmod) {
+						patched |= restorePckTextEntry(raf, absOffset, size, FMOD_PROJECT_GODOT_ENTRIES);
+						patched |= patchPckTextEntry(raf, absOffset, size, new String[] { SENTRY_PROJECT_GODOT_ENTRY });
+					} else {
 						patched |= patchPckTextEntry(raf, absOffset, size, new String[] {
-							"res://addons/fmod/fmod.gdextension",
+							SENTRY_PROJECT_GODOT_ENTRY,
+							FMOD_PROJECT_GODOT_ENTRIES[0]
+						});
+					}
+				} else if (isPckPath(path, ".godot/extension_list.cfg")) {
+					if (!keepFmod) {
+						patched |= patchPckTextEntry(raf, absOffset, size, new String[] {
+							FMOD_EXTENSION_LIST_ENTRIES[0],
 							"res://addons/sentry/sentry.gdextension",
 							"res://addons/spine/spine_godot_extension.gdextension"
 						});
 					} else {
+						patched |= restorePckTextEntry(raf, absOffset, size, FMOD_EXTENSION_LIST_ENTRIES);
 						patched |= patchPckTextEntry(raf, absOffset, size, new String[] {
-							"res://addons/fmod/fmod.gdextension",
 							"res://addons/sentry/sentry.gdextension"
 						});
 					}
 				} else if (isPckPath(path, "scenes/game.tscn")) {
-					patched |= patchPckTextEntry(raf, absOffset, size, new String[] {
-						"[ext_resource type=\"Script\" uid=\"uid://c6blhu0io0iwp\" path=\"res://src/gdscript/audio_manager_proxy.gd\" id=\"3_xfu11\"]",
-						"[node name=\"FmodBankLoader\" type=\"FmodBankLoader\" parent=\".\"]",
-						"bank_paths = [\"res://banks/desktop/Master.strings.bank\", \"res://banks/desktop/Master.bank\", \"res://banks/desktop/sfx.bank\", \"res://banks/desktop/temp_sfx.bank\", \"res://banks/desktop/ambience.bank\"]",
-						"script = ExtResource(\"3_xfu11\")",
-						"[node name=\"FmodListener2D\" type=\"FmodListener2D\" parent=\"AudioManager\"]"
-					});
+					if (keepFmod) {
+						patched |= restorePckTextEntry(raf, absOffset, size, FMOD_GAME_SCENE_ENTRIES);
+					} else {
+						patched |= patchPckTextEntry(raf, absOffset, size, FMOD_GAME_SCENE_ENTRIES);
+					}
 				}
 			}
 
@@ -1015,7 +1050,23 @@ public class GodotApp extends GodotActivity {
 		return expected.equals(path) || ("res://" + expected).equals(path);
 	}
 
-	private boolean patchPckBinaryProjectEntry(RandomAccessFile raf, long offset, long size) throws IOException {
+	private static final String SENTRY_PROJECT_GODOT_ENTRY =
+		"SentryInit=\"*res://addons/sentry/SentryInit.gd\"";
+	private static final String[] FMOD_PROJECT_GODOT_ENTRIES = {
+		"FmodManager=\"*res://addons/fmod/FmodManager.gd\""
+	};
+	private static final String[] FMOD_EXTENSION_LIST_ENTRIES = {
+		"res://addons/fmod/fmod.gdextension"
+	};
+	private static final String[] FMOD_GAME_SCENE_ENTRIES = {
+		"[ext_resource type=\"Script\" uid=\"uid://c6blhu0io0iwp\" path=\"res://src/gdscript/audio_manager_proxy.gd\" id=\"3_xfu11\"]",
+		"[node name=\"FmodBankLoader\" type=\"FmodBankLoader\" parent=\".\"]",
+		"bank_paths = [\"res://banks/desktop/Master.strings.bank\", \"res://banks/desktop/Master.bank\", \"res://banks/desktop/sfx.bank\", \"res://banks/desktop/temp_sfx.bank\", \"res://banks/desktop/ambience.bank\"]",
+		"script = ExtResource(\"3_xfu11\")",
+		"[node name=\"FmodListener2D\" type=\"FmodListener2D\" parent=\"AudioManager\"]"
+	};
+
+	private boolean patchPckBinaryProjectEntry(RandomAccessFile raf, long offset, long size, boolean keepFmod) throws IOException {
 		if (offset < 0 || size < 0 || size > 8L * 1024L * 1024L || offset + size > raf.length()) {
 			return false;
 		}
@@ -1027,7 +1078,11 @@ public class GodotApp extends GodotActivity {
 
 		boolean patched = false;
 		patched |= replacePckEntryBytes(content, "autoload/SentryInit", "disabled/SentryInit");
-		patched |= replacePckEntryBytes(content, "autoload/FmodManager", "disabled/FmodManager");
+		if (keepFmod) {
+			patched |= replacePckEntryBytes(content, "disabled/FmodManager", "autoload/FmodManager");
+		} else {
+			patched |= replacePckEntryBytes(content, "autoload/FmodManager", "disabled/FmodManager");
+		}
 
 		if (patched) {
 			raf.seek(offset);
@@ -1137,6 +1192,76 @@ public class GodotApp extends GodotActivity {
 
 		raf.seek(saved);
 		return patched;
+	}
+
+	// Undoes patchPckTextEntry for the given original lines. A line it disabled with
+	// ';' is found by its exact ';'-prefixed form. A line it blanked with spaces is
+	// only restored where a run of exactly that many spaces fills a whole line, so a
+	// longer blanked line (e.g. the Sentry entry) can never be mistaken for it.
+	private boolean restorePckTextEntry(RandomAccessFile raf, long offset, long size, String[] originals) throws IOException {
+		if (offset < 0 || size < 0 || size > 8L * 1024L * 1024L || offset + size > raf.length()) {
+			return false;
+		}
+
+		long saved = raf.getFilePointer();
+		raf.seek(offset);
+		byte[] content = new byte[(int)size];
+		raf.readFully(content);
+		boolean patched = false;
+
+		for (String original : originals) {
+			byte[] originalBytes = original.getBytes("UTF-8");
+			if (indexOf(content, originalBytes) >= 0) {
+				continue;
+			}
+
+			int idx;
+			if (original.indexOf("://") >= 0 && !original.endsWith(".gd\"")) {
+				idx = indexOfBlankLine(content, originalBytes.length);
+			} else {
+				byte[] disabled = originalBytes.clone();
+				disabled[0] = (byte)';';
+				idx = indexOf(content, disabled);
+			}
+			if (idx < 0) {
+				continue;
+			}
+
+			System.arraycopy(originalBytes, 0, content, idx, originalBytes.length);
+			patched = true;
+		}
+
+		if (patched) {
+			raf.seek(offset);
+			raf.write(content);
+		}
+
+		raf.seek(saved);
+		return patched;
+	}
+
+	private int indexOfBlankLine(byte[] content, int length) {
+		int lineStart = 0;
+		while (lineStart <= content.length - length) {
+			int lineEnd = lineStart;
+			while (lineEnd < content.length && content[lineEnd] != '\n' && content[lineEnd] != '\r') {
+				lineEnd++;
+			}
+			if (lineEnd - lineStart == length) {
+				boolean blank = true;
+				for (int i = lineStart; i < lineEnd; i++) {
+					if (content[i] != ' ') {
+						blank = false;
+						break;
+					}
+				}
+				if (blank) {
+					return lineStart;
+				}
+			}
+			lineStart = lineEnd + 1;
+		}
+		return -1;
 	}
 
 	private boolean replacePckEntryBytes(byte[] content, String searchText, String replacementText) throws IOException {

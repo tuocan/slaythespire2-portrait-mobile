@@ -50,7 +50,12 @@ internal sealed class LauncherUI : Control
         // honoring the portrait request. Building against that transient size
         // permanently leaves the launcher tiny and letterboxed, so wait until
         // PortraitDisplay has installed the portrait canvas.
-        if (OperatingSystem.IsAndroid() && !PortraitDisplay.Apply())
+        // A landscape game boot never installs the portrait canvas (the game
+        // keeps its own window), so it must not wait for it: the in-game
+        // launcher pass only resumes the pending Start game and closes.
+        if (OperatingSystem.IsAndroid()
+            && !OrientationPreference.LandscapeGameActive
+            && !PortraitDisplay.Apply())
             return;
 
         _buildAttempted = true;

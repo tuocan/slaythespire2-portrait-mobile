@@ -232,6 +232,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Host "Patching managed assemblies for Android..."
+$env:STS2_PATCH_REFERENCE_DIR = $upstreamPublishDir
 dotnet $patcherDll `
     (Join-Path $bclDir "SteamKit2.dll") `
     (Join-Path $bclDir "STS2Mobile.dll") `

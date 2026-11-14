@@ -40,6 +40,8 @@ internal static class PortraitTouchInput
         _installed = true;
         PatchHelper.Log("[Touch] Pointer bridge installed");
         PortraitFrameBudget.StartMonitor(tree);
+        if (OrientationPreference.LandscapeGameActive)
+            return;
         PortraitTouchPass.StartMonitor(tree);
         PortraitDisplay.StartAspectGuard(tree);
     }
@@ -95,6 +97,13 @@ internal static class PortraitTouchInput
 
     private static void UpdatePinchState()
     {
+        // Map pinch-zoom is tuned for the portrait map column.
+        if (OrientationPreference.LandscapeGameActive)
+        {
+            _pinching = false;
+            return;
+        }
+
         if (_finger0 is { } a && _finger1 is { } b)
         {
             if (_pinching || PortraitMap.VisibleMap() is null)

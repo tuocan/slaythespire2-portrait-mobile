@@ -159,10 +159,28 @@ internal sealed class LauncherController
                 showCloudSync: false
             );
             ResumeLaunchAfterPckRestart();
+            MaybeDevAutoStart();
             return;
         }
 
         _view.ShowOfflineImport();
+    }
+
+    // Dev iteration hook, same convention as the other /data/local/tmp flags:
+    // with /data/local/tmp/sts2_autostart present, an offline launcher presses
+    // Start game by itself so a device boot can be tested over adb (vendor
+    // builds such as HyperOS refuse `adb shell input tap`). Never present on a
+    // normal install.
+    private static bool _devAutoStartDone;
+
+    private void MaybeDevAutoStart()
+    {
+        if (_devAutoStartDone || !System.IO.File.Exists("/data/local/tmp/sts2_autostart"))
+            return;
+
+        _devAutoStartDone = true;
+        PatchHelper.Log("[Launcher] Dev autostart flag present; starting game");
+        _model.Launch();
     }
 
     private void SteamOnlineModePressed()
@@ -839,6 +857,7 @@ internal sealed class LauncherController
             showUpdate: false
         );
         ResumeLaunchAfterPckRestart();
+        MaybeDevAutoStart();
     }
 
     private void ResumeLaunchAfterPckRestart()

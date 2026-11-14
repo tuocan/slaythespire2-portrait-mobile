@@ -33,6 +33,7 @@ internal sealed class ActionSection : VBoxContainer
     private readonly Button _showLastErrorButton;
     private readonly Button _copyRawLogButton;
     private readonly Button _changeModeButton;
+    private readonly Button _orientationButton;
     private readonly Button _moreButton;
     private readonly Button _troubleshootingButton;
     private readonly HBoxContainer _saveToggleRow;
@@ -71,6 +72,14 @@ internal sealed class ActionSection : VBoxContainer
         );
         if (_launchButton is StyledButton primaryLaunch)
             primaryLaunch.UsePrimaryAccent();
+
+        _orientationButton = AddHiddenButton(
+            OrientationText(OrientationPreference.IsLandscape()),
+            scale,
+            LauncherSectionMetrics.SecondaryButtonFontSize,
+            LauncherSectionMetrics.SecondaryButtonHeight,
+            ToggleOrientation
+        );
 
         _saveToggleRow = BuildCompactRow(scale);
         _saveToggleRow.Visible = false;
@@ -152,10 +161,24 @@ internal sealed class ActionSection : VBoxContainer
         SetToggleChecked(_cloudSyncToggle, value, CloudSyncText);
     }
 
+    // The game leg reads the saved choice on its next boot (Java picks the
+    // window orientation, STS2Mobile skips the portrait layout layer).
+    private void ToggleOrientation()
+    {
+        var landscape = !OrientationPreference.IsLandscape();
+        OrientationPreference.SetLandscape(landscape);
+        _orientationButton.Text = OrientationText(landscape);
+    }
+
+    private static string OrientationText(bool landscape)
+        => landscape ? "Game orientation: Landscape" : "Game orientation: Portrait";
+
     internal void ShowLaunch(string text, bool showCloudSync, bool showUpdate)
     {
         _launchButton.Text = text;
         _launchButton.Visible = true;
+        _orientationButton.Text = OrientationText(OrientationPreference.IsLandscape());
+        _orientationButton.Visible = true;
         SetCloudControlsVisible(showCloudSync);
         ShowLaunchButtons(showUpdate);
         _retryButton.Visible = false;
@@ -209,6 +232,7 @@ internal sealed class ActionSection : VBoxContainer
         SetSupportButtonsVisible(true);
         _safeLaunchButton.Visible = false;
         _launchButton.Visible = false;
+        _orientationButton.Visible = false;
         _changeModeButton.Visible = true;
     }
 
@@ -219,6 +243,7 @@ internal sealed class ActionSection : VBoxContainer
         SetSupportButtonsVisible(false);
         _safeLaunchButton.Visible = false;
         _launchButton.Visible = false;
+        _orientationButton.Visible = false;
         _changeModeButton.Visible = false;
     }
 

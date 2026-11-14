@@ -114,6 +114,12 @@ internal static class LauncherStartupFlow
 
             await startupTask;
             PatchHelper.Log("NGame.GameStartup completed");
+            // The touch pointer bridge cannot attach during patch orchestration
+            // (no scene tree yet). Portrait installs it later from a layout
+            // patch; landscape has none, so install it here (idempotent).
+            STS2Mobile.Portrait.PortraitTouchInput.Install();
+            STS2Mobile.Landscape.LandscapeLayout.Apply();
+            STS2Mobile.AndroidBackButton.Install();
             if (!await LauncherGameStartupRecovery.EnsureMainMenuReadyAsync(game, gameNode, startupStatus))
                 return;
 

@@ -119,6 +119,7 @@ internal static class LauncherStartupFlow
             // patch; landscape has none, so install it here (idempotent).
             STS2Mobile.Portrait.PortraitTouchInput.Install();
             STS2Mobile.Landscape.LandscapeLayout.Apply();
+            STS2Mobile.AndroidBackButton.Install();
             if (!await LauncherGameStartupRecovery.EnsureMainMenuReadyAsync(game, gameNode, startupStatus))
                 return;
 

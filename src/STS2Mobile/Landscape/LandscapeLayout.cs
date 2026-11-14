@@ -8,6 +8,7 @@ using MegaCrit.Sts2.Core.Nodes;
 using MegaCrit.Sts2.Core.Nodes.Combat;
 using MegaCrit.Sts2.Core.Nodes.CommonUi;
 using MegaCrit.Sts2.Core.Nodes.Screens.MainMenu;
+using MegaCrit.Sts2.Core.Nodes.Screens.Shops;
 
 namespace STS2Mobile.Landscape;
 
@@ -19,24 +20,34 @@ namespace STS2Mobile.Landscape;
 //   - side margins: corner icons (settings gear, deck, map) sit under the
 //     panel's rounded corners; a slightly narrower "keep" canvas leaves a thin
 //     bar on each side.
-//   - hand lift: resting hand cards hang below the screen edge (on PC the text
-//     shows on mouse hover); every resting slot is raised.
+//   - hand lift (optional, default off): resting hand cards hang below the
+//     screen edge as on PC, where the text shows on hover; a lift raises every
+//     resting slot.
+//   - shop zoom: the merchant rug is enlarged to fit the free screen area.
+// Individual screens (top bar, main menu, settings, card previews) are grown
+// separately in LandscapeScreens.
 // Values can be tuned live on a device, polled every second:
 //   /data/local/tmp/sts2_land_zoom      e.g. "0.80"
 //   /data/local/tmp/sts2_land_aspect    canvas aspect, e.g. "2.05" (0 = no margins)
 //   /data/local/tmp/sts2_land_handlift  canvas units, e.g. "170"
+//   /data/local/tmp/sts2_land_shopzoom  max shop zoom, e.g. "1.6" (1 = off; read on each open)
 internal static class LandscapeLayout
 {
     private const float DefaultZoom = 0.80f;
     // 0 = leave the canvas aspect to the game's own Aspect Ratio setting
     // (Settings: 4:3, 16:10, 16:9, 21:9, Auto), which already letterboxes.
     private const float DefaultAspect = 0f;
-    private const float DefaultHandLift = 170f;
+    // 0 keeps the game's own resting hand position (card text shows on touch).
+    private const float DefaultHandLift = 0f;
+    // Upper bound for the shop panel zoom; the real factor is the largest that
+    // still fits the panel between the top bar and the screen edges.
+    private const float DefaultShopZoomMax = 1.6f;
     private const int CanvasHeight = 1080;
 
     private const string ZoomFile = "/data/local/tmp/sts2_land_zoom";
     private const string AspectFile = "/data/local/tmp/sts2_land_aspect";
     private const string HandLiftFile = "/data/local/tmp/sts2_land_handlift";
+    private const string ShopZoomFile = "/data/local/tmp/sts2_land_shopzoom";
 
     private static bool _applied;
     private static float _zoom = DefaultZoom;
@@ -52,12 +63,114 @@ internal static class LandscapeLayout
         PatchHelper.Patch(harmony, typeof(NGame), "OnWindowChange", postfix: postfix);
         PatchHelper.Patch(harmony, typeof(NGlobalUi), "OnWindowChange", postfix: postfix);
         PatchHelper.Patch(harmony, typeof(NMainMenu), "OnWindowChange", postfix: postfix);
+
+        PatchHelper.Patch(
+            harmony,
+            typeof(NMerchantInventory),
+            "Open",
+            postfix: AccessTools.Method(typeof(LandscapeLayout), nameof(ShopOpenPostfix))
+        );
+        PatchHelper.Patch(
+            harmony,
+            typeof(NMerchantInventory),
+            "Close",
+            prefix: AccessTools.Method(typeof(LandscapeLayout), nameof(ShopClosePrefix))
+        );
+
+        LandscapeScreens.InstallPatches(harmony);
+    }
+
+    // The shop rug (NMerchantInventory._slotsContainer) is authored for a PC
+    // monitor; on a phone its card text is unreadable. Scale it to the largest
+    // size that fits between the top bar and the screen edges, keeping the back
+    // button (a sibling, outside the container) where it is. The container
+    // slides in vertically to _openPosition, so the resting rect is known as
+    // soon as Open starts and the zoom rides along with the slide.
+    private static void ShopOpenPostfix(object __instance)
+    {
+        if (!_applied || __instance is not Node inventory)
+            return;
+
+        try
+        {
+            var t = Traverse.Create(inventory);
+            var slots = t.Field("_slotsContainer").GetValue<Control>();
+            if (slots is null)
+                return;
+
+            slots.Scale = Vector2.One;
+            slots.PivotOffset = Vector2.Zero;
+
+            var cap = Math.Clamp(ReadDevFloat(ShopZoomFile, DefaultShopZoomMax), 1f, 2.5f);
+            if (cap <= 1.01f)
+                return;
+
+            var view = slots.GetViewportRect().Size;
+            var openY = t.Field("_openPosition").GetValue<float>();
+            var restTopLeft = slots.GlobalPosition + new Vector2(0f, openY - slots.Position.Y);
+            var size = slots.Size;
+            if (size.X <= 1f || size.Y <= 1f)
+                return;
+
+            // Keep clear of the run HUD (top bar and relic row), which the
+            // landscape layout enlarges and which draws over the room.
+            var top = Math.Max(view.Y * 0.075f, LandscapeScreens.HudBottom() + 8f);
+            var area = new Rect2(
+                view.X * 0.06f,
+                top,
+                view.X * 0.88f,
+                view.Y * 0.99f - top
+            );
+            var scale = Math.Min(cap, Math.Min(area.Size.X / size.X, area.Size.Y / size.Y));
+            if (scale <= 1.01f)
+            {
+                PatchHelper.Log($"[Landscape] shop panel already fills the screen (size={size}, view={view})");
+                return;
+            }
+
+            // Pick the pivot that maps the resting panel's centre onto the
+            // centre of the free area: centre' = P + s*(C - P).
+            var target = area.GetCenter() - restTopLeft;
+            var pivot = (target - size * (scale * 0.5f)) / (1f - scale);
+            slots.PivotOffset = pivot;
+            slots.Scale = Vector2.One * scale;
+            PatchHelper.Log(
+                $"[Landscape] shop zoom {scale:F2} (panel={size}, rest={restTopLeft}, view={view})"
+            );
+        }
+        catch (Exception ex)
+        {
+            PatchHelper.Log($"[Landscape] shop zoom skipped: {ex.GetBaseException().Message}");
+        }
+    }
+
+    // Close slides the container to its authored closed height, which only
+    // clears an unscaled panel; shrink back while it slides out.
+    private static void ShopClosePrefix(object __instance)
+    {
+        if (!_applied || __instance is not Node inventory)
+            return;
+
+        try
+        {
+            var slots = Traverse.Create(inventory).Field("_slotsContainer").GetValue<Control>();
+            if (slots is null || slots.Scale.IsEqualApprox(Vector2.One))
+                return;
+            slots.CreateTween().TweenProperty(slots, "scale", Vector2.One, 0.12);
+        }
+        catch (Exception ex)
+        {
+            PatchHelper.Log($"[Landscape] shop zoom reset skipped: {ex.GetBaseException().Message}");
+        }
     }
 
     private static void WindowPostfix()
     {
         if (_applied && Engine.GetMainLoop() is SceneTree tree && tree.Root is not null)
+        {
             ApplyWindow(tree.Root);
+            LandscapeScreens.Reapply();
+        }
     }
 
     internal static void Apply()
@@ -75,6 +188,7 @@ internal static class LandscapeLayout
             $"[Landscape] zoom={_zoom:F2} aspect={_aspect:F2} handLift={_appliedLift:F0} visible={tree.Root.GetVisibleRect().Size}"
         );
         Guard(tree);
+        LandscapeScreens.Start(tree);
     }
 
     private static void ApplyWindow(Window window)
@@ -186,7 +300,7 @@ internal static class LandscapeLayout
         }
     }
 
-    private static float ReadDevFloat(string path, float fallback)
+    internal static float ReadDevFloat(string path, float fallback)
     {
         try
         {
